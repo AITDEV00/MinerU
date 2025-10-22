@@ -48,13 +48,13 @@ services:
       memlock: -1
       stack: 67108864
     ipc: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: [ "0" ]
-              capabilities: [ gpu ]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           device_ids: [ "0" ]
+    #           capabilities: [ gpu ]
 
   mineru-gradio:
     image: mineru-vllm:latest
