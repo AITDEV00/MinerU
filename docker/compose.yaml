@@ -18,6 +18,8 @@ services:
       memlock: -1
       stack: 67108864
     ipc: host
+    networks:
+      - common_net
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:30000/health || exit 1"]
     deploy:
@@ -34,7 +36,7 @@ services:
     restart: always
     profiles: ["api"]
     ports:
-      - 8000:8000
+      - 8410:8000
     environment:
       MINERU_MODEL_SOURCE: local
     entrypoint: mineru-api
@@ -48,13 +50,15 @@ services:
       memlock: -1
       stack: 67108864
     ipc: host
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]  # Modify for multiple GPUs: ["0", "1"]
-              capabilities: [gpu]
+    networks:
+      - common_net
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           device_ids: [ "0" ] # Modify for multiple GPUs: ["0", "1"]
+    #           capabilities: [ gpu ]
 
   mineru-gradio:
     image: mineru:latest
@@ -78,6 +82,8 @@ services:
       memlock: -1
       stack: 67108864
     ipc: host
+    networks:
+      - common_net
     deploy:
       resources:
         reservations:
@@ -85,3 +91,9 @@ services:
             - driver: nvidia
               device_ids: ["0"]  # Modify for multiple GPUs: ["0", "1"]
               capabilities: [gpu]
+
+
+networks:
+  common_net:
+    external: true
+    name: common_network
