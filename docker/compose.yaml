@@ -37,12 +37,23 @@ services:
     profiles: ["api"]
     ports:
       - 8410:8000
+    volumes:
+      - ./patch-ssl-verify.sh:/patch-ssl-verify.sh:ro
     environment:
       MINERU_MODEL_SOURCE: local
-    entrypoint: mineru-api
+      # VLM Server Configuration for hybrid-http-client backend
+      MINERU_VL_API_KEY: sk-Xk6gFypC1q1nq2Ucd7Y02e60LQK3-UUEC3cmBUCS0jU
+      # Note: Don't include /v1 at the end - MinerU adds it automatically
+      MINERU_VL_SERVER: https://inference.adeoaiengine.ecouncil.ae/models/afbe1fff-c939-4504-9a40-609484f64a75/proxy
+      # Reduce concurrency to avoid overwhelming VLM server (default: 100)
+      MINERU_VLM_MAX_CONCURRENCY: "10"
+      # Increase timeout for slow VLM responses (default: 600s = 10min)
+      MINERU_VLM_HTTP_TIMEOUT: "900"
+    entrypoint: /bin/bash
     command:
-      --host 0.0.0.0
-      --port 8000
+      - -c
+      - |
+        /patch-ssl-verify.sh && mineru-api --host 0.0.0.0 --port 8000
       # parameters for vllm-engine
       # --data-parallel-size 2  # If using multiple GPUs, increase throughput using vllm's multi-GPU parallel mode
       # --gpu-memory-utilization 0.5  # If running on a single GPU and encountering VRAM shortage, reduce the KV cache size by this parameter, if VRAM issues persist, try lowering it further to `0.4` or below.
@@ -84,13 +95,13 @@ services:
     ipc: host
     networks:
       - common_net
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]  # Modify for multiple GPUs: ["0", "1"]
-              capabilities: [gpu]
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           device_ids: ["0"]  # Modify for multiple GPUs: ["0", "1"]
+    #           capabilities: [gpu]
 
 
 networks:
