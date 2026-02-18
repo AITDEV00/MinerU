@@ -51,3 +51,6 @@ _build/
 
 
 output/
+
+# HuggingFace model cache - do not commit (downloaded at runtime)
+models_cache/
