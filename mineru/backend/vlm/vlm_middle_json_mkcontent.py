@@ -91,13 +91,48 @@ def merge_para_with_text(para_block, formula_enable=True, img_buket_path=''):
     return para_text
 
 
-def mk_blocks_to_markdown(para_blocks, make_mode, formula_enable, table_enable, img_buket_path=''):
+def _format_discarded_block(para_type, content: str, page_idx: int | None = None) -> str:
+    """Format discarded block types with contextual labels for markdown output."""
+    if not content.strip():
+        return content
+    labels = {
+        BlockType.HEADER: "Header",
+        BlockType.FOOTER: "Footer",
+        BlockType.PAGE_NUMBER: "Page number",
+        BlockType.ASIDE_TEXT: "Aside",
+        BlockType.PAGE_FOOTNOTE: "Footnote",
+    }
+    label = labels.get(para_type)
+    if label:
+        # For page number, add page index when available for extra context
+        if para_type == BlockType.PAGE_NUMBER and page_idx is not None:
+            return f"[{label} (p.{page_idx + 1}): {content.strip()}]"
+        return f"[{label}: {content.strip()}]"
+    return content
+
+
+def mk_blocks_to_markdown(para_blocks, make_mode, formula_enable, table_enable, img_buket_path='', page_idx: int | None = None):
     page_markdown = []
+    discarded_types = {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER, BlockType.ASIDE_TEXT, BlockType.PAGE_FOOTNOTE}
     for para_block in para_blocks:
         para_text = ''
         para_type = para_block['type']
-        if para_type in [BlockType.TEXT, BlockType.INTERLINE_EQUATION, BlockType.PHONETIC, BlockType.REF_TEXT]:
-            para_text = merge_para_with_text(para_block, formula_enable=formula_enable, img_buket_path=img_buket_path)
+        if para_type in [
+            BlockType.TEXT,
+            BlockType.INTERLINE_EQUATION,
+            BlockType.PHONETIC,
+            BlockType.REF_TEXT,
+            BlockType.HEADER,
+            BlockType.FOOTER,
+            BlockType.PAGE_NUMBER,
+            BlockType.ASIDE_TEXT,
+            BlockType.PAGE_FOOTNOTE,
+        ]:
+            raw_text = merge_para_with_text(para_block, formula_enable=formula_enable, img_buket_path=img_buket_path)
+            if para_type in discarded_types:
+                para_text = _format_discarded_block(para_type, raw_text, page_idx)
+            else:
+                para_text = raw_text
         elif para_type == BlockType.LIST:
             for block in para_block['blocks']:
                 item_text = merge_para_with_text(block, formula_enable=formula_enable, img_buket_path=img_buket_path)
@@ -621,9 +656,12 @@ def union_make(pdf_info_dict: list,
         page_idx = page_info.get('page_idx')
         page_size = page_info.get('page_size')
         if make_mode in [MakeMode.MM_MD, MakeMode.NLP_MD]:
-            if not paras_of_layout:
+            para_blocks = (paras_of_layout or []) + (paras_of_discarded or [])
+            if not para_blocks:
                 continue
-            page_markdown = mk_blocks_to_markdown(paras_of_layout, make_mode, formula_enable, table_enable, img_buket_path)
+            page_markdown = mk_blocks_to_markdown(
+                para_blocks, make_mode, formula_enable, table_enable, img_buket_path, page_idx=page_idx
+            )
             output_content.extend(page_markdown)
         elif make_mode == MakeMode.CONTENT_LIST:
             para_blocks = (paras_of_layout or []) + (paras_of_discarded or [])

@@ -47,10 +47,11 @@ class ModelSingleton:
             max_concurrency = kwargs.get("max_concurrency", 100)  # for http-client backend only
             http_timeout = kwargs.get("http_timeout", 600)  # for http-client backend only
             server_headers = kwargs.get("server_headers", None)  # for http-client backend only
+            model_name = kwargs.get("model_name", None)  # for http-client backend only
             max_retries = kwargs.get("max_retries", 3)  # for http-client backend only
             retry_backoff_factor = kwargs.get("retry_backoff_factor", 0.5)  # for http-client backend only
             # 从kwargs中移除这些参数，避免传递给不相关的初始化函数
-            for param in ["batch_size", "max_concurrency", "http_timeout", "server_headers", "max_retries", "retry_backoff_factor"]:
+            for param in ["batch_size", "max_concurrency", "http_timeout", "server_headers", "model_name", "max_retries", "retry_backoff_factor"]:
                 if param in kwargs:
                     del kwargs[param]
             if backend not in ["http-client"] and not model_path:
@@ -177,6 +178,7 @@ class ModelSingleton:
                 lmdeploy_engine=lmdeploy_engine,
                 vllm_llm=vllm_llm,
                 vllm_async_llm=vllm_async_llm,
+                model_name=model_name,
                 server_url=server_url,
                 batch_size=batch_size,
                 max_concurrency=max_concurrency,

@@ -42,6 +42,7 @@ def blocks_to_page_info(
         page_index,
         _ocr_enable,
         _vlm_ocr_enable,
+        discarded_blocks_enable: bool = True,
 ) -> dict:
     """将blocks转换为页面信息"""
 
@@ -61,6 +62,7 @@ def blocks_to_page_info(
         height,
         _ocr_enable,
         _vlm_ocr_enable,
+        discarded_blocks_enable=discarded_blocks_enable,
     )
     image_blocks = magic_model.get_image_blocks()
     table_blocks = magic_model.get_table_blocks()
@@ -142,6 +144,7 @@ def result_to_middle_json(
         _ocr_enable,
         _vlm_ocr_enable,
         hybrid_pipeline_model,
+        discarded_blocks_enable: bool = True,
 ):
     middle_json = {
         "pdf_info": [],
@@ -157,7 +160,8 @@ def result_to_middle_json(
         page_info = blocks_to_page_info(
             page_blocks, page_inline_formula, page_ocr_res,
             image_dict, page, image_writer, index,
-            _ocr_enable, _vlm_ocr_enable
+            _ocr_enable, _vlm_ocr_enable,
+            discarded_blocks_enable=discarded_blocks_enable,
         )
         middle_json["pdf_info"].append(page_info)
 

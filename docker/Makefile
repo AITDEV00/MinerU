@@ -1,26 +1,64 @@
-# Default image name if not provided
-NAME := adeo-icarus-mineru
-USERNAME := jya0
+# MinerU Docker - Build, push, and run (all in this project)
+# Fork: https://github.com/AITDEV00/MinerU | Upstream: https://github.com/opendatalab/MinerU
 
-# Get today's date in dd-mm-yyyy format
+NAME := adeo-mineru-api
 DATE := $(shell date +%d-%m-%Y)
+REGISTRY := zdc-ai-harbor.ecouncil.ae
+REPO := $(REGISTRY)/aiteam/$(NAME)
+RUNTIME := $(shell command -v podman 2>/dev/null || echo docker)
+COMPOSE_SPLIT := -f docker-compose.api-split-vlm.yml
 
-# Docker image tag with date
-IMAGE_TAG := $(NAME):$(DATE)
+.PHONY: help build push login build-split-vlm push-split-vlm run-split-vlm run-split-vlm-build run-split-vlm-down
 
-.PHONY: all docker_build
+help:
+	@echo "MinerU Docker (AITDEV00 fork)"
+	@echo ""
+	@echo "  make build              Build API image (CPU, split VLM client)"
+	@echo "  make login              Login to Harbor"
+	@echo "  make push               Push to Harbor ($(REPO))"
+	@echo ""
+	@echo "Split VLM (parse_method=vlm, layout=MinerU2.5 + extraction=Qwen3-VL):"
+	@echo "  make build-split-vlm    Build split VLM API image"
+	@echo "  make push-split-vlm     Push split VLM image to Harbor ($(REPO))"
+	@echo "  make run-split-vlm      Start API on port 8085"
+	@echo "  make run-split-vlm-build  Build + start"
+	@echo "  make run-split-vlm-down   Stop API"
+	@echo ""
 
-all: docker_build
+build:
+	@echo "Building $(NAME):$(DATE)..."
+	$(RUNTIME) build -f Dockerfile.api -t $(NAME):$(DATE) -t $(NAME):latest ..
 
-docker_build:
-	@echo "Building docker image: $(IMAGE_TAG)"
-	@docker build ./global -t $(IMAGE_TAG)
+login:
+	$(RUNTIME) login $(REGISTRY)
 
-docker_upload:
-	@echo "Uploading docker image: $(IMAGE_TAG) to Docker Hub"
-	@docker tag $(IMAGE_TAG) $(USERNAME)/$(IMAGE_TAG)
-	@docker push $(USERNAME)/$(IMAGE_TAG)
+push: build
+	@echo "Pushing to $(REPO)..."
+	$(RUNTIME) tag $(NAME):$(DATE) $(REPO):$(DATE)
+	$(RUNTIME) tag $(NAME):$(DATE) $(REPO):latest
+	$(RUNTIME) push $(REPO):$(DATE)
+	$(RUNTIME) push $(REPO):latest
+	@echo "Pushed: $(REPO):$(DATE) $(REPO):latest"
 
+build-split-vlm:
+	@echo "Building $(NAME):split-vlm..."
+	$(RUNTIME) build -f Dockerfile.api-split-vlm -t $(NAME):split-vlm ..
 
-# docker tag ray-jina-colbert-v2:rc-09102025 jya0/ray-jina-colbert-v2:rc-09102025
-# docker save -o /home/jyao/Documents/ray-jina-colbert-v2:rc-09102025.tar ray-jina-colbert-v2:rc-09102025ray-jina-colbert-v2:rc-09102025
+push-split-vlm: build-split-vlm
+	@echo "Pushing $(NAME):split-vlm to $(REPO)..."
+	$(RUNTIME) tag $(NAME):split-vlm $(REPO):split-vlm
+	$(RUNTIME) tag $(NAME):split-vlm $(REPO):latest
+	$(RUNTIME) push $(REPO):split-vlm
+	$(RUNTIME) push $(REPO):latest
+	@echo "Pushed: $(REPO):split-vlm $(REPO):latest"
+
+run-split-vlm:
+	$(RUNTIME) compose $(COMPOSE_SPLIT) up -d
+	@echo "API: http://localhost:8085/docs"
+
+run-split-vlm-build:
+	$(RUNTIME) compose $(COMPOSE_SPLIT) up -d --build
+	@echo "API: http://localhost:8085/docs"
+
+run-split-vlm-down:
+	$(RUNTIME) compose $(COMPOSE_SPLIT) down

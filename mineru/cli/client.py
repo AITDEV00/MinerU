@@ -44,12 +44,13 @@ from .common import do_parse, read_fn, pdf_suffixes, image_suffixes
     '-m',
     '--method',
     'method',
-    type=click.Choice(['auto', 'txt', 'ocr']),
+    type=click.Choice(['auto', 'txt', 'ocr', 'vlm']),
     help="""\b
     the method for parsing pdf:
       auto: Automatically determine the method based on the file type.
       txt: Use text extraction method.
       ocr: Use OCR method for image-based PDFs.
+      vlm: Layout via MinerU2.5, extraction via Qwen3-VL-30B (requires MINERU_VL_SERVER_EXTRACTION).
     Without method specified, 'auto' will be used by default.
     Adapted only for the case where the backend is set to 'pipeline' and 'hybrid-*'.""",
     default='auto',

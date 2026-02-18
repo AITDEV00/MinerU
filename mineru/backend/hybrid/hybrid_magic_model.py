@@ -24,6 +24,7 @@ class MagicModel:
         height,
         _ocr_enable,
         _vlm_ocr_enable,
+        discarded_blocks_enable: bool = True,
     ):
         self.page_blocks = page_blocks
         self.page_inline_formula = page_inline_formula
@@ -270,7 +271,10 @@ class MagicModel:
             elif block["type"] in [BlockType.PHONETIC]:
                 self.phonetic_blocks.append(block)
             elif block["type"] in [BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER, BlockType.ASIDE_TEXT, BlockType.PAGE_FOOTNOTE]:
-                self.discarded_blocks.append(block)
+                if discarded_blocks_enable:
+                    self.discarded_blocks.append(block)
+                else:
+                    self.text_blocks.append(block)
             elif block["type"] == BlockType.LIST:
                 self.list_blocks.append(block)
             else:

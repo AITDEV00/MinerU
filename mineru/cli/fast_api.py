@@ -96,6 +96,19 @@ def encode_image(image_path: str) -> str:
         return b64encode(f.read()).decode()
 
 
+@app.get(path="/health-check")
+async def health_check():
+    """Health check endpoint for K8s readiness/liveness probes"""
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "healthy",
+            "service": "mineru-api",
+            "version": __version__
+        }
+    )
+
+
 def get_infer_result(file_suffix_identifier: str, pdf_name: str, parse_dir: str) -> Optional[str]:
     """从结果文件中读取推理结果"""
     result_file_path = os.path.join(parse_dir, f"{pdf_name}{file_suffix_identifier}")
@@ -146,10 +159,15 @@ async def parse_pdf(
 - auto: Automatically determine the method based on the file type
 - txt: Use text extraction method
 - ocr: Use OCR method for image-based PDFs
+- vlm: Layout via MinerU2.5, extraction via Qwen3-VL-30B (requires MINERU_VL_SERVER_EXTRACTION)
 """
         ),
         formula_enable: bool = Form(True, description="Enable formula parsing."),
         table_enable: bool = Form(True, description="Enable table parsing."),
+        discarded_blocks_enable: bool = Form(
+            True,
+            description="When True, header/footer/page_number/aside/page_footnote go to discarded_blocks (excluded from main content). When False, include them as regular text blocks."
+        ),
         server_url: Optional[str] = Form(
             None,
             description="(Adapted only for <vlm/hybrid>-http-client backend)openai compatible server url, e.g., http://127.0.0.1:30000"
@@ -221,6 +239,7 @@ async def parse_pdf(
             parse_method=parse_method,
             formula_enable=formula_enable,
             table_enable=table_enable,
+            discarded_blocks_enable=discarded_blocks_enable,
             server_url=server_url,
             f_draw_layout_bbox=False,
             f_draw_span_bbox=False,
@@ -247,6 +266,8 @@ async def parse_pdf(
                     elif backend.startswith("vlm"):
                         parse_dir = os.path.join(unique_dir, pdf_name, "vlm")
                     elif backend.startswith("hybrid"):
+                        parse_dir = os.path.join(unique_dir, pdf_name, f"hybrid_{parse_method}")
+                    else:
                         parse_dir = os.path.join(unique_dir, pdf_name, f"hybrid_{parse_method}")
 
                     if not os.path.exists(parse_dir):
@@ -299,6 +320,8 @@ async def parse_pdf(
                     parse_dir = os.path.join(unique_dir, pdf_name, "vlm")
                 elif backend.startswith("hybrid"):
                     parse_dir = os.path.join(unique_dir, pdf_name, f"hybrid_{parse_method}")
+                else:
+                    parse_dir = os.path.join(unique_dir, pdf_name, f"hybrid_{parse_method}")
 
                 if os.path.exists(parse_dir):
                     if return_md:
@@ -339,7 +362,7 @@ async def parse_pdf(
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
 @click.pass_context
 @click.option('--host', default='127.0.0.1', help='Server host (default: 127.0.0.1)')
-@click.option('--port', default=8000, type=int, help='Server port (default: 8000)')
+@click.option('--port', default=8080, type=int, help='Server port (default: 8080)')
 @click.option('--reload', is_flag=True, help='Enable auto-reload (development mode)')
 def main(ctx, host, port, reload, **kwargs):
 

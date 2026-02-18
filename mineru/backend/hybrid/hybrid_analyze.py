@@ -1,4 +1,5 @@
 #  Copyright (c) Opendatalab. All rights reserved.
+import asyncio
 import os
 import time
 from collections import defaultdict
@@ -38,6 +39,8 @@ def ocr_classify(pdf_bytes, parse_method: str = 'auto',) -> bool:
             _ocr_enable = True
     elif parse_method == 'ocr':
         _ocr_enable = True
+    elif parse_method == 'vlm':
+        _ocr_enable = True  # VLM path handles extraction; treat as OCR-enabled for middle_json
     return _ocr_enable
 
 def ocr_det(
@@ -366,19 +369,149 @@ def get_batch_ratio(device):
     return batch_ratio
 
 
-def _should_enable_vlm_ocr(ocr_enable: bool, language: str, inline_formula_enable: bool) -> bool:
-    """判断是否启用VLM OCR"""
+# MinerU2.5 extraction: ch, en only (non-split path)
+VLM_LANGUAGES = ["ch", "en"]
+
+# Qwen3-VL-30B extraction supports all lang_list options (split path when parse_method=vlm)
+QWEN3_VL_LANGUAGES = frozenset([
+    "ch", "ch_lite", "ch_server", "en", "korean", "japan", "chinese_cht",
+    "ta", "te", "ka", "th", "el", "latin", "arabic", "east_slavic", "cyrillic", "devanagari",
+])
+
+
+def _build_split_not_extract_list() -> list[str]:
+    """Build not_extract_list for split layout+extraction based on table_enable and formula_enable.
+    When table_enable=False, skip table extraction (render as image). When formula_enable=False, skip equation extraction."""
+    skip = []
+    _table_enable = os.getenv("MINERU_VLM_TABLE_ENABLE", "true").lower() in ("true", "1", "yes")
+    _formula_enable = os.getenv("MINERU_VLM_FORMULA_ENABLE", "true").lower() in ("true", "1", "yes")
+    if not _table_enable:
+        skip.append("table")
+    if not _formula_enable:
+        skip.extend(["equation", "interline_equation"])
+    if skip:
+        logger.info(f"Extraction skip list (table_enable={_table_enable}, formula_enable={_formula_enable}): {skip}")
+    return skip
+
+
+def _is_split_vlm_ocr(parse_method: str, language: str, inline_formula_enable: bool) -> bool:
+    """True when parse_method=vlm, language supported by Qwen3-VL, and MINERU_VL_SERVER_EXTRACTION is set.
+    formula_enable no longer gates the split flow; when False, equation extraction is skipped and equations render as images."""
+    force_pipeline = os.getenv("MINERU_HYBRID_FORCE_PIPELINE_ENABLE", "0").lower() in ("1", "true", "yes")
+    extraction_url = os.getenv("MINERU_VL_SERVER_EXTRACTION")
+    return (
+        parse_method == "vlm"
+        and language in QWEN3_VL_LANGUAGES
+        and not force_pipeline
+        and bool(extraction_url)
+    )
+
+
+def _should_enable_vlm_ocr(ocr_enable: bool, language: str, inline_formula_enable: bool, parse_method: str = "auto") -> bool:
+    """判断是否启用VLM OCR (VLM extraction instead of pipeline OCR)"""
     force_enable = os.getenv("MINERU_FORCE_VLM_OCR_ENABLE", "0").lower() in ("1", "true", "yes")
     if force_enable:
         return True
 
     force_pipeline = os.getenv("MINERU_HYBRID_FORCE_PIPELINE_ENABLE", "0").lower() in ("1", "true", "yes")
+    # When parse_method=vlm and extraction server is set, _is_split_vlm_ocr handles it
+    if _is_split_vlm_ocr(parse_method, language, inline_formula_enable):
+        return True
     return (
-            ocr_enable
-            and language in ["ch", "en"]
-            and inline_formula_enable
-            and not force_pipeline
+        ocr_enable
+        and language in VLM_LANGUAGES
+        and inline_formula_enable
+        and not force_pipeline
     )
+
+
+def _get_layout_server_url(server_url: str | None) -> tuple[str | None, dict | None]:
+    """Get MinerU2.5 layout server URL and optional headers."""
+    url = server_url or os.getenv("MINERU_VL_SERVER")
+    if not url:
+        return None, None
+    url = url.rstrip("/") + "/" if not url.endswith("/") else url
+    api_key = os.getenv("MINERU_VL_API_KEY")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    return url, headers
+
+
+def _get_extraction_server_url() -> tuple[str | None, dict | None, str | None]:
+    """Get Qwen3-VL extraction server URL, headers, and optional model name."""
+    url = os.getenv("MINERU_VL_SERVER_EXTRACTION")
+    if not url:
+        return None, None, None
+    url = url.rstrip("/") + "/" if not url.endswith("/") else url
+    api_key = os.getenv("MINERU_VL_API_KEY_EXTRACTION") or os.getenv("MINERU_VL_API_KEY")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    model_name = os.getenv("MINERU_VL_MODEL_NAME_EXTRACTION") or "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    return url, headers, model_name
+
+
+def _batch_split_layout_extract(
+    layout_client: MinerUClient,
+    extraction_client: MinerUClient,
+    images: list,
+    not_extract_list: list | None = None,
+) -> list:
+    """Layout via MinerU2.5, extraction via Qwen3-VL."""
+    blocks_list = layout_client.batch_layout_detect(images)
+    logger.info("Extract Preparation: preparing block crops for extraction")
+    prepared = layout_client.helper.batch_prepare_for_extract(
+        layout_client.executor, images, blocks_list, not_extract_list
+    )
+    all_images, all_prompts, all_params, all_indices = [], [], [], []
+    for page_idx, (block_images, prompts, params, indices) in enumerate(prepared):
+        all_images.extend(block_images)
+        all_prompts.extend(prompts)
+        all_params.extend(params)
+        all_indices.extend((page_idx, idx) for idx in indices)
+    n_blocks = len(all_images)
+    logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL")
+    outputs = extraction_client.client.batch_predict(all_images, all_prompts, all_params, None)
+    logger.info(f"Extraction: completed {len(outputs)} blocks")
+    for (page_idx, block_idx), output in zip(all_indices, outputs):
+        blocks_list[page_idx][block_idx].content = output
+    return layout_client.helper.batch_post_process(layout_client.executor, blocks_list)
+
+
+async def _aio_batch_split_layout_extract(
+    layout_client: MinerUClient,
+    extraction_client: MinerUClient,
+    images: list,
+    not_extract_list: list | None = None,
+    semaphore: asyncio.Semaphore | None = None,
+) -> list:
+    """Async: Layout via MinerU2.5, extraction via Qwen3-VL."""
+    semaphore = semaphore or asyncio.Semaphore(layout_client.max_concurrency)
+    blocks_list = await layout_client.aio_batch_layout_detect(images, semaphore=semaphore)
+    logger.info("Extract Preparation: preparing block crops for extraction")
+    prepared = await asyncio.gather(*[
+        layout_client.helper.aio_prepare_for_extract(
+            layout_client.executor, images[i], blocks_list[i], not_extract_list
+        )
+        for i in range(len(images))
+    ])
+    all_images, all_prompts, all_params, all_indices = [], [], [], []
+    for page_idx, (block_images, prompts, params, indices) in enumerate(prepared):
+        all_images.extend(block_images)
+        all_prompts.extend(prompts)
+        all_params.extend(params)
+        all_indices.extend((page_idx, idx) for idx in indices)
+    n_blocks = len(all_images)
+    logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL")
+    outputs = await extraction_client.client.aio_batch_predict(
+        all_images, all_prompts, all_params, None, semaphore=semaphore,
+        use_tqdm=True, tqdm_desc="Extraction",
+    )
+    logger.info(f"Extraction: completed {len(outputs)} blocks")
+    for (page_idx, block_idx), output in zip(all_indices, outputs):
+        blocks_list[page_idx][block_idx].content = output
+    post_processed = await asyncio.gather(*[
+        layout_client.helper.aio_post_process(layout_client.executor, blocks)
+        for blocks in blocks_list
+    ])
+    return list(post_processed)
 
 
 def doc_analyze(
@@ -393,32 +526,90 @@ def doc_analyze(
         server_url: str | None = None,
         **kwargs,
 ):
-    # 初始化预测器
-    if predictor is None:
-        predictor = ModelSingleton().get_model(backend, model_path, server_url, **kwargs)
+    _ocr_enable = ocr_classify(pdf_bytes, parse_method=parse_method)
+    _split_vlm_ocr = _is_split_vlm_ocr(parse_method, language, inline_formula_enable)
+    _vlm_ocr_enable = _should_enable_vlm_ocr(_ocr_enable, language, inline_formula_enable, parse_method)
 
-    # 加载图像
     load_images_start = time.time()
     images_list, pdf_doc = load_images_from_pdf(pdf_bytes, image_type=ImageType.PIL)
     images_pil_list = [image_dict["img_pil"] for image_dict in images_list]
     load_images_time = round(time.time() - load_images_start, 2)
     logger.debug(f"load images cost: {load_images_time}, speed: {round(len(images_pil_list)/load_images_time, 3)} images/s")
 
-    # 获取设备信息
     device = get_device()
 
-    # 确定OCR配置
-    _ocr_enable = ocr_classify(pdf_bytes, parse_method=parse_method)
-    _vlm_ocr_enable = _should_enable_vlm_ocr(_ocr_enable, language, inline_formula_enable)
-
     infer_start = time.time()
-    # VLM提取
-    if _vlm_ocr_enable:
+    if _split_vlm_ocr:
+        # Layout via MinerU2.5, extraction via Qwen3-VL
+        layout_url, layout_headers = _get_layout_server_url(server_url)
+        extraction_url, extraction_headers, extraction_model_name = _get_extraction_server_url()
+        if not layout_url or not extraction_url:
+            raise ValueError("parse_method=vlm requires MINERU_VL_SERVER and MINERU_VL_SERVER_EXTRACTION")
+        layout_kwargs = {**kwargs}
+        extraction_kwargs = {**kwargs}
+        _max_conc = int(os.getenv("MINERU_VL_MAX_CONCURRENCY", "16"))
+        layout_kwargs.setdefault("max_concurrency", _max_conc)
+        extraction_kwargs.setdefault("max_concurrency", _max_conc)
+        if layout_headers:
+            layout_kwargs["server_headers"] = layout_headers
+        layout_kwargs.setdefault("http_timeout", int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600")))
+        layout_kwargs.setdefault("max_retries", int(os.getenv("MINERU_VL_MAX_RETRIES", "5")))
+        layout_kwargs.setdefault("retry_backoff_factor", float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0")))
+        if extraction_headers:
+            extraction_kwargs["server_headers"] = extraction_headers
+        if extraction_model_name:
+            extraction_kwargs["model_name"] = extraction_model_name
+        # VLM client tuning from env (helps with 504 upstream unavailable on overloaded inference gateway)
+        _http_timeout = int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600"))
+        _max_retries = int(os.getenv("MINERU_VL_MAX_RETRIES", "5"))
+        _retry_backoff = float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0"))
+        extraction_kwargs.setdefault("http_timeout", _http_timeout)
+        extraction_kwargs.setdefault("max_retries", _max_retries)
+        extraction_kwargs.setdefault("retry_backoff_factor", _retry_backoff)
+        layout_predictor = ModelSingleton().get_model(backend, model_path, layout_url, **layout_kwargs)
+        # HttpVlmClient overwrites headers with MINERU_VL_API_KEY; temporarily use extraction key
+        _old_key = os.environ.get("MINERU_VL_API_KEY")
+        _ext_key = os.getenv("MINERU_VL_API_KEY_EXTRACTION")
+        if _ext_key:
+            os.environ["MINERU_VL_API_KEY"] = _ext_key
+        try:
+            extraction_predictor = ModelSingleton().get_model(backend, model_path, extraction_url, **extraction_kwargs)
+        finally:
+            if _old_key is not None:
+                os.environ["MINERU_VL_API_KEY"] = _old_key
+            elif _ext_key and "MINERU_VL_API_KEY" in os.environ:
+                del os.environ["MINERU_VL_API_KEY"]
+        split_not_extract = _build_split_not_extract_list()
+        results = _batch_split_layout_extract(
+            layout_predictor, extraction_predictor, images_pil_list, not_extract_list=split_not_extract
+        )
+        hybrid_pipeline_model = None
+        inline_formula_list = [[] for _ in images_pil_list]
+        ocr_res_list = [[] for _ in images_pil_list]
+    elif _vlm_ocr_enable:
+        if predictor is None:
+            layout_url, layout_headers = _get_layout_server_url(server_url)
+            model_kwargs = {**kwargs}
+            if layout_headers:
+                model_kwargs["server_headers"] = layout_headers
+            model_kwargs.setdefault("http_timeout", int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600")))
+            model_kwargs.setdefault("max_retries", int(os.getenv("MINERU_VL_MAX_RETRIES", "5")))
+            model_kwargs.setdefault("retry_backoff_factor", float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0")))
+            predictor = ModelSingleton().get_model(backend, model_path, layout_url, **model_kwargs)
         results = predictor.batch_two_step_extract(images=images_pil_list)
         hybrid_pipeline_model = None
         inline_formula_list = [[] for _ in images_pil_list]
         ocr_res_list = [[] for _ in images_pil_list]
     else:
+        if predictor is None:
+            layout_url, layout_headers = _get_layout_server_url(server_url)
+            model_kwargs = {**kwargs}
+            if layout_headers:
+                model_kwargs["server_headers"] = layout_headers
+            model_kwargs.setdefault("http_timeout", int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600")))
+            model_kwargs.setdefault("max_retries", int(os.getenv("MINERU_VL_MAX_RETRIES", "5")))
+            model_kwargs.setdefault("retry_backoff_factor", float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0")))
+            predictor = ModelSingleton().get_model(backend, model_path, layout_url, **model_kwargs)
         batch_ratio = get_batch_ratio(device)
         results = predictor.batch_two_step_extract(
             images=images_pil_list,
@@ -437,6 +628,7 @@ def doc_analyze(
     logger.debug(f"infer finished, cost: {infer_time}, speed: {round(len(results)/infer_time, 3)} page/s")
 
     # 生成中间JSON
+    discarded_blocks_enable = kwargs.get("discarded_blocks_enable", True)
     middle_json = result_to_middle_json(
         results,
         inline_formula_list,
@@ -447,6 +639,7 @@ def doc_analyze(
         _ocr_enable,
         _vlm_ocr_enable,
         hybrid_pipeline_model,
+        discarded_blocks_enable=discarded_blocks_enable,
     )
 
     clean_memory(device)
@@ -465,32 +658,89 @@ async def aio_doc_analyze(
     server_url: str | None = None,
     **kwargs,
 ):
-    # 初始化预测器
-    if predictor is None:
-        predictor = ModelSingleton().get_model(backend, model_path, server_url, **kwargs)
+    _ocr_enable = ocr_classify(pdf_bytes, parse_method=parse_method)
+    _split_vlm_ocr = _is_split_vlm_ocr(parse_method, language, inline_formula_enable)
+    _vlm_ocr_enable = _should_enable_vlm_ocr(_ocr_enable, language, inline_formula_enable, parse_method)
 
-    # 加载图像
     load_images_start = time.time()
     images_list, pdf_doc = load_images_from_pdf(pdf_bytes, image_type=ImageType.PIL)
     images_pil_list = [image_dict["img_pil"] for image_dict in images_list]
     load_images_time = round(time.time() - load_images_start, 2)
     logger.debug(f"load images cost: {load_images_time}, speed: {round(len(images_pil_list)/load_images_time, 3)} images/s")
 
-    # 获取设备信息
     device = get_device()
 
-    # 确定OCR配置
-    _ocr_enable = ocr_classify(pdf_bytes, parse_method=parse_method)
-    _vlm_ocr_enable = _should_enable_vlm_ocr(_ocr_enable, language, inline_formula_enable)
-
     infer_start = time.time()
-    # VLM提取
-    if _vlm_ocr_enable:
+    if _split_vlm_ocr:
+        layout_url, layout_headers = _get_layout_server_url(server_url)
+        extraction_url, extraction_headers, extraction_model_name = _get_extraction_server_url()
+        if not layout_url or not extraction_url:
+            raise ValueError("parse_method=vlm requires MINERU_VL_SERVER and MINERU_VL_SERVER_EXTRACTION")
+        layout_kwargs = {**kwargs}
+        extraction_kwargs = {**kwargs}
+        _max_conc = int(os.getenv("MINERU_VL_MAX_CONCURRENCY", "16"))
+        layout_kwargs.setdefault("max_concurrency", _max_conc)
+        extraction_kwargs.setdefault("max_concurrency", _max_conc)
+        if layout_headers:
+            layout_kwargs["server_headers"] = layout_headers
+        layout_kwargs.setdefault("http_timeout", int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600")))
+        layout_kwargs.setdefault("max_retries", int(os.getenv("MINERU_VL_MAX_RETRIES", "5")))
+        layout_kwargs.setdefault("retry_backoff_factor", float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0")))
+        if extraction_headers:
+            extraction_kwargs["server_headers"] = extraction_headers
+        if extraction_model_name:
+            extraction_kwargs["model_name"] = extraction_model_name
+        # VLM client tuning from env (helps with 504 upstream unavailable on overloaded inference gateway)
+        _http_timeout = int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600"))
+        _max_retries = int(os.getenv("MINERU_VL_MAX_RETRIES", "5"))
+        _retry_backoff = float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0"))
+        extraction_kwargs.setdefault("http_timeout", _http_timeout)
+        extraction_kwargs.setdefault("max_retries", _max_retries)
+        extraction_kwargs.setdefault("retry_backoff_factor", _retry_backoff)
+        layout_predictor = ModelSingleton().get_model(backend, model_path, layout_url, **layout_kwargs)
+        # HttpVlmClient overwrites headers with MINERU_VL_API_KEY; temporarily use extraction key
+        _old_key = os.environ.get("MINERU_VL_API_KEY")
+        _ext_key = os.getenv("MINERU_VL_API_KEY_EXTRACTION")
+        if _ext_key:
+            os.environ["MINERU_VL_API_KEY"] = _ext_key
+        try:
+            extraction_predictor = ModelSingleton().get_model(backend, model_path, extraction_url, **extraction_kwargs)
+        finally:
+            if _old_key is not None:
+                os.environ["MINERU_VL_API_KEY"] = _old_key
+            elif _ext_key and "MINERU_VL_API_KEY" in os.environ:
+                del os.environ["MINERU_VL_API_KEY"]
+        split_not_extract = _build_split_not_extract_list()
+        results = await _aio_batch_split_layout_extract(
+            layout_predictor, extraction_predictor, images_pil_list, not_extract_list=split_not_extract
+        )
+        hybrid_pipeline_model = None
+        inline_formula_list = [[] for _ in images_pil_list]
+        ocr_res_list = [[] for _ in images_pil_list]
+    elif _vlm_ocr_enable:
+        if predictor is None:
+            layout_url, layout_headers = _get_layout_server_url(server_url)
+            model_kwargs = {**kwargs}
+            if layout_headers:
+                model_kwargs["server_headers"] = layout_headers
+            model_kwargs.setdefault("http_timeout", int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600")))
+            model_kwargs.setdefault("max_retries", int(os.getenv("MINERU_VL_MAX_RETRIES", "5")))
+            model_kwargs.setdefault("retry_backoff_factor", float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0")))
+            predictor = ModelSingleton().get_model(backend, model_path, layout_url, **model_kwargs)
         results = await predictor.aio_batch_two_step_extract(images=images_pil_list)
         hybrid_pipeline_model = None
         inline_formula_list = [[] for _ in images_pil_list]
         ocr_res_list = [[] for _ in images_pil_list]
     else:
+        if predictor is None:
+            layout_url, layout_headers = _get_layout_server_url(server_url)
+            model_kwargs = {**kwargs}
+            if layout_headers:
+                model_kwargs["server_headers"] = layout_headers
+            model_kwargs.setdefault("http_timeout", int(os.getenv("MINERU_VL_HTTP_TIMEOUT", "600")))
+            model_kwargs.setdefault("max_retries", int(os.getenv("MINERU_VL_MAX_RETRIES", "5")))
+            model_kwargs.setdefault("retry_backoff_factor", float(os.getenv("MINERU_VL_RETRY_BACKOFF", "1.0")))
+            predictor = ModelSingleton().get_model(backend, model_path, layout_url, **model_kwargs)
         batch_ratio = get_batch_ratio(device)
         results = await predictor.aio_batch_two_step_extract(
             images=images_pil_list,
@@ -509,6 +759,7 @@ async def aio_doc_analyze(
     logger.debug(f"infer finished, cost: {infer_time}, speed: {round(len(results)/infer_time, 3)} page/s")
 
     # 生成中间JSON
+    discarded_blocks_enable = kwargs.get("discarded_blocks_enable", True)
     middle_json = result_to_middle_json(
         results,
         inline_formula_list,
@@ -519,6 +770,7 @@ async def aio_doc_analyze(
         _ocr_enable,
         _vlm_ocr_enable,
         hybrid_pipeline_model,
+        discarded_blocks_enable=discarded_blocks_enable,
     )
 
     clean_memory(device)

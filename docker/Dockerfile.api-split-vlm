@@ -1,0 +1,29 @@
+# MinerU API with parse_method=vlm (Split Layout + Extraction)
+# Layout via MinerU2.5, extraction via Qwen3-VL. Fast build - models at runtime.
+# Build from MinerU root: docker build -f docker/Dockerfile.api-split-vlm -t adeo-mineru-api:split-vlm .
+
+FROM python:3.11-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-noto-core fonts-noto-cjk fontconfig libgl1 libglib2.0-0 \
+    && fc-cache -fv && rm -rf /var/lib/apt/lists/*
+
+# Install MinerU from local source (patched with split VLM)
+COPY . /tmp/MinerU
+RUN pip install --no-cache-dir "/tmp/MinerU[core]" fastapi uvicorn python-multipart httpx \
+    && rm -rf /tmp/MinerU
+
+RUN mkdir -p /root/.cache/huggingface
+
+WORKDIR /app
+COPY docker/ssl_patch.py /app/
+COPY docker/entrypoint-api-split-vlm.sh /app/entrypoint.sh
+RUN cp /app/ssl_patch.py $(python3 -c "import site; print(site.getsitepackages()[0])")/sitecustomize.py \
+    && chmod +x /app/entrypoint.sh
+
+ENV MINERU_MODEL_SOURCE=local
+ENV MINERU_DEFAULT_BACKEND=hybrid-http-client
+ENV HF_HOME=/root/.cache/huggingface
+EXPOSE 8000
+
+ENTRYPOINT ["/app/entrypoint.sh"]
