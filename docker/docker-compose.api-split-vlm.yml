@@ -19,8 +19,8 @@ services:
       - MINERU_VL_SERVER_EXTRACTION=${MINERU_VL_SERVER_EXTRACTION:-https://inference.adeoaiengine.ecouncil.ae/models/91c6dca7-b1c4-4e0b-8fec-11e8b82448f2/proxy/}
       - MINERU_VL_MODEL_NAME_EXTRACTION=${MINERU_VL_MODEL_NAME_EXTRACTION:-Qwen/Qwen3-VL-30B-A3B-Instruct}
       - MINERU_DEFAULT_BACKEND=hybrid-http-client
-      # huggingface = download OCR models when smart routing needs them; local = requires ~/mineru.json
-      - MINERU_MODEL_SOURCE=huggingface
+      # local = use models baked in image (air-gapped). Override with huggingface only if you need runtime download.
+      - MINERU_MODEL_SOURCE=local
       - MINERU_SSL_VERIFY=false
       - MINERU_PDF_RENDER_THREADS=8
       - MINERU_HYBRID_BATCH_RATIO=8

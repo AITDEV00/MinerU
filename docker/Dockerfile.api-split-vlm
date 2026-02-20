@@ -1,5 +1,5 @@
 # MinerU API with parse_method=vlm (Split Layout + Extraction)
-# Layout via MinerU2.5, extraction via Qwen3-VL. Fast build - models at runtime.
+# Layout via MinerU2.5, extraction via Qwen3-VL. Models baked for air-gapped deployment.
 # Build from MinerU root: docker build -f docker/Dockerfile.api-split-vlm -t adeo-mineru-api:split-vlm .
 
 FROM python:3.11-slim-bookworm
@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir "/tmp/MinerU[core]" fastapi uvicorn python-multip
     && rm -rf /tmp/MinerU
 
 RUN mkdir -p /root/.cache/huggingface
+
+# Bake pipeline models (OCR, layout, etc.) at build time for air-gapped app cluster.
+# VLM runs remotely on GPU; only pipeline models needed for smart routing OCR path.
+RUN MINERU_MODEL_SOURCE=huggingface mineru-models-download -s huggingface -m pipeline
 
 WORKDIR /app
 COPY docker/ssl_patch.py /app/
