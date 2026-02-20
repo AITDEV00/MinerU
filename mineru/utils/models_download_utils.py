@@ -18,6 +18,11 @@ def auto_download_and_get_model_root_path(relative_path: str, repo_mode='pipelin
 
     if model_source == 'local':
         local_models_config = get_local_models_dir()
+        if local_models_config is None:
+            raise ValueError(
+                f"MINERU_MODEL_SOURCE=local but local models config not found. "
+                f"Create ~/mineru.json with 'models-dir' or set MINERU_MODEL_SOURCE=huggingface."
+            )
         root_path = local_models_config.get(repo_mode, None)
         if not root_path:
             raise ValueError(f"Local path for repo_mode '{repo_mode}' is not configured.")

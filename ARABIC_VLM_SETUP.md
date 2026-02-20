@@ -42,6 +42,8 @@ Add to `icarus-mineru.env` (or ConfigMap):
 MINERU_VL_SERVER_EXTRACTION=https://inference.adeoaiengine.ecouncil.ae/models/91c6dca7-b1c4-4e0b-8fec-11e8b82448f2/proxy/
 # Optional: separate API key for extraction server
 # MINERU_VL_API_KEY_EXTRACTION=sk-...
+# Optional: extraction batch size (default 8). Set 0 to disable chunking.
+# MINERU_VL_EXTRACTION_BATCH_SIZE=8
 ```
 
 ### 3. Usage
@@ -59,6 +61,14 @@ For `parse_method=auto` or `parse_method=ocr`: layout and extraction both use Mi
 PDF (parse_method=vlm, lang supported) → hybrid-http-client
   → _is_split_vlm_ocr: True (MINERU_VL_SERVER_EXTRACTION set)
   → layout_client (MinerU2.5): batch_layout_detect
-  → extraction_client (Qwen3-VL): batch_predict on block images
+  → extraction_client (Qwen3-VL): batch_predict on block images (chunked via MINERU_VL_EXTRACTION_BATCH_SIZE)
   → middle_json (layout structure from MinerU2.5, content from Qwen3-VL)
 ```
+
+## Batch Extraction (MINERU_VL_EXTRACTION_BATCH_SIZE)
+
+Extraction requests to Qwen3-VL are chunked into batches (similar to `vlm_processor` in ait-icarus-backend):
+
+- **Default**: 8 blocks per batch
+- **Set to 0**: No chunking — all blocks sent with max_concurrency limit (original behavior)
+- **Benefits**: Limits concurrent requests per round, reduces 504 "Upstream service unavailable" on overloaded gateways

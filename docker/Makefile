@@ -6,6 +6,8 @@ DATE := $(shell date +%d-%m-%Y)
 REGISTRY := zdc-ai-harbor.ecouncil.ae
 REPO := $(REGISTRY)/aiteam/$(NAME)
 RUNTIME := $(shell command -v podman 2>/dev/null || echo docker)
+# podman needs --tls-verify=false for self-signed Harbor; docker ignores
+PUSH_OPTS := $(if $(findstring podman,$(RUNTIME)),--tls-verify=false,)
 COMPOSE_SPLIT := -f docker-compose.api-split-vlm.yml
 
 .PHONY: help build push login build-split-vlm push-split-vlm run-split-vlm run-split-vlm-build run-split-vlm-down
@@ -48,8 +50,8 @@ push-split-vlm: build-split-vlm
 	@echo "Pushing $(NAME):split-vlm to $(REPO)..."
 	$(RUNTIME) tag $(NAME):split-vlm $(REPO):split-vlm
 	$(RUNTIME) tag $(NAME):split-vlm $(REPO):latest
-	$(RUNTIME) push $(REPO):split-vlm
-	$(RUNTIME) push $(REPO):latest
+	$(RUNTIME) push $(PUSH_OPTS) $(REPO):split-vlm
+	$(RUNTIME) push $(PUSH_OPTS) $(REPO):latest
 	@echo "Pushed: $(REPO):split-vlm $(REPO):latest"
 
 run-split-vlm:

@@ -23,6 +23,11 @@ from mineru.utils.ocr_utils import get_adjusted_mfdetrec_res, get_ocr_result_lis
 from mineru.utils.pdf_classify import classify
 from mineru.utils.pdf_image_tools import load_images_from_pdf
 
+from mineru.backend.hybrid.extraction_routing import (
+    is_smart_routing_enabled,
+    run_prepare_stage,
+)
+
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # 让mps可以fallback
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'  # 禁止albumentations检查更新
 
@@ -30,6 +35,23 @@ MFR_BASE_BATCH_SIZE = 16
 OCR_DET_BASE_BATCH_SIZE = 16
 
 not_extract_list = [item.value for item in NotExtractType]
+
+
+def _block_image_to_bgr(img) -> np.ndarray:
+    """Convert block image (PIL Image or PNG bytes from http-client) to BGR array for OpenCV/OCR.
+    When layout backend is http-client, block images are PNG bytes, not PIL; np.array(bytes)
+    yields dtype |S5041 which cvtColor rejects."""
+    if isinstance(img, bytes):
+        arr = np.frombuffer(img, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise ValueError("Failed to decode block image from PNG bytes")
+        return bgr
+    np_img = np.array(img)
+    if np_img.dtype.kind in ('S', 'U', 'O'):  # string, unicode, object
+        raise ValueError(f"Block image has invalid dtype {np_img.dtype}, expected pixel data")
+    return cv2.cvtColor(np_img, cv2.COLOR_RGB2BGR)
+
 
 def ocr_classify(pdf_bytes, parse_method: str = 'auto',) -> bool:
     # 确定OCR设置
@@ -436,6 +458,11 @@ def _get_layout_server_url(server_url: str | None) -> tuple[str | None, dict | N
     return url, headers
 
 
+def _get_extraction_batch_size() -> int:
+    """Get extraction batch size from env (0 = no chunking, process all at once)."""
+    return max(0, int(os.getenv("MINERU_VL_EXTRACTION_BATCH_SIZE", "8")))
+
+
 def _get_extraction_server_url() -> tuple[str | None, dict | None, str | None]:
     """Get Qwen3-VL extraction server URL, headers, and optional model name."""
     url = os.getenv("MINERU_VL_SERVER_EXTRACTION")
@@ -452,9 +479,13 @@ def _batch_split_layout_extract(
     layout_client: MinerUClient,
     extraction_client: MinerUClient,
     images: list,
+    pdf_bytes: bytes | None = None,
+    pdf_doc=None,
     not_extract_list: list | None = None,
+    language: str = "en",
 ) -> list:
-    """Layout via MinerU2.5, extraction via Qwen3-VL."""
+    """Layout via MinerU2.5, extraction via Qwen3-VL. Supports batched extraction via MINERU_VL_EXTRACTION_BATCH_SIZE.
+    When MINERU_VL_SMART_ROUTING_ENABLE is set, routes blocks to PDF text extraction, OCR, or Qwen3-VL."""
     blocks_list = layout_client.batch_layout_detect(images)
     logger.info("Extract Preparation: preparing block crops for extraction")
     prepared = layout_client.helper.batch_prepare_for_extract(
@@ -467,11 +498,79 @@ def _batch_split_layout_extract(
         all_params.extend(params)
         all_indices.extend((page_idx, idx) for idx in indices)
     n_blocks = len(all_images)
-    logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL")
-    outputs = extraction_client.client.batch_predict(all_images, all_prompts, all_params, None)
-    logger.info(f"Extraction: completed {len(outputs)} blocks")
-    for (page_idx, block_idx), output in zip(all_indices, outputs):
-        blocks_list[page_idx][block_idx].content = output
+
+    if is_smart_routing_enabled() and pdf_bytes is not None and pdf_doc is not None:
+        routing = run_prepare_stage(
+            pdf_bytes, pdf_doc, images, blocks_list, not_extract_list or [], language, prepared
+        )
+        for page_idx, block_idx, text in routing.pdf_text_blocks:
+            blocks_list[page_idx][block_idx].content = text
+        ocr_fallback_to_vlm: list[tuple[int, int, int]] = []
+        if routing.ocr_blocks:
+            try:
+                hybrid_model = HybridModelSingleton().get_model(lang=language, formula_enable=False)
+                ocr_images_bgr = [
+                    _block_image_to_bgr(img) for (_, _, img, _) in routing.ocr_blocks
+                ]
+                ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=False)[0]
+                for (page_idx, block_idx, _, _), (ocr_text, _) in zip(routing.ocr_blocks, ocr_results):
+                    blocks_list[page_idx][block_idx].content = ocr_text
+            except Exception as e:
+                logger.warning(
+                    f"OCR unavailable ({e}), re-routing {len(routing.ocr_blocks)} blocks to Qwen3-VL"
+                )
+                ocr_fallback_to_vlm = [(p, b, f) for (p, b, _, f) in routing.ocr_blocks]
+        vlm_indices_combined = list(routing.vlm_indices) + ocr_fallback_to_vlm
+        if vlm_indices_combined:
+            vlm_images = [all_images[f] for (_, _, f) in vlm_indices_combined]
+            vlm_prompts = [all_prompts[f] for (_, _, f) in vlm_indices_combined]
+            vlm_params = [all_params[f] for (_, _, f) in vlm_indices_combined]
+            vlm_indices_map = [(p, b) for (p, b, _) in vlm_indices_combined]
+            batch_size = _get_extraction_batch_size()
+            if batch_size > 0:
+                vlm_outputs = []
+                for i in range(0, len(vlm_images), batch_size):
+                    chunk_out = extraction_client.client.batch_predict(
+                        vlm_images[i : i + batch_size],
+                        vlm_prompts[i : i + batch_size],
+                        vlm_params[i : i + batch_size],
+                        None,
+                    )
+                    vlm_outputs.extend(chunk_out)
+                    if i + batch_size < len(vlm_images):
+                        time.sleep(0.1)
+            else:
+                vlm_outputs = extraction_client.client.batch_predict(
+                    vlm_images, vlm_prompts, vlm_params, None
+                )
+            for (page_idx, block_idx), output in zip(vlm_indices_map, vlm_outputs):
+                blocks_list[page_idx][block_idx].content = output
+        logger.info(
+            f"Smart routing complete: {len(routing.pdf_text_blocks)} blocks extracted using PDF text, "
+            f"{len(routing.ocr_blocks)} blocks sent to OCR, {len(routing.vlm_indices)} blocks sent to Qwen3-VL"
+        )
+    else:
+        batch_size = _get_extraction_batch_size()
+        logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL" + (
+            f" in batches of {batch_size}" if batch_size > 0 else ""
+        ))
+        if batch_size > 0:
+            outputs = []
+            for i in range(0, n_blocks, batch_size):
+                chunk_images = all_images[i : i + batch_size]
+                chunk_prompts = all_prompts[i : i + batch_size]
+                chunk_params = all_params[i : i + batch_size]
+                chunk_out = extraction_client.client.batch_predict(
+                    chunk_images, chunk_prompts, chunk_params, None
+                )
+                outputs.extend(chunk_out)
+                if i + batch_size < n_blocks:
+                    time.sleep(0.1)
+        else:
+            outputs = extraction_client.client.batch_predict(all_images, all_prompts, all_params, None)
+        logger.info(f"Extraction: completed {len(outputs)} blocks")
+        for (page_idx, block_idx), output in zip(all_indices, outputs):
+            blocks_list[page_idx][block_idx].content = output
     return layout_client.helper.batch_post_process(layout_client.executor, blocks_list)
 
 
@@ -479,10 +578,14 @@ async def _aio_batch_split_layout_extract(
     layout_client: MinerUClient,
     extraction_client: MinerUClient,
     images: list,
+    pdf_bytes: bytes | None = None,
+    pdf_doc=None,
     not_extract_list: list | None = None,
+    language: str = "en",
     semaphore: asyncio.Semaphore | None = None,
 ) -> list:
-    """Async: Layout via MinerU2.5, extraction via Qwen3-VL."""
+    """Async: Layout via MinerU2.5, extraction via Qwen3-VL. Supports batched extraction via MINERU_VL_EXTRACTION_BATCH_SIZE.
+    When MINERU_VL_SMART_ROUTING_ENABLE is set, routes blocks to PDF text extraction, OCR, or Qwen3-VL."""
     semaphore = semaphore or asyncio.Semaphore(layout_client.max_concurrency)
     blocks_list = await layout_client.aio_batch_layout_detect(images, semaphore=semaphore)
     logger.info("Extract Preparation: preparing block crops for extraction")
@@ -499,14 +602,86 @@ async def _aio_batch_split_layout_extract(
         all_params.extend(params)
         all_indices.extend((page_idx, idx) for idx in indices)
     n_blocks = len(all_images)
-    logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL")
-    outputs = await extraction_client.client.aio_batch_predict(
-        all_images, all_prompts, all_params, None, semaphore=semaphore,
-        use_tqdm=True, tqdm_desc="Extraction",
-    )
-    logger.info(f"Extraction: completed {len(outputs)} blocks")
-    for (page_idx, block_idx), output in zip(all_indices, outputs):
-        blocks_list[page_idx][block_idx].content = output
+
+    if is_smart_routing_enabled() and pdf_bytes is not None and pdf_doc is not None:
+        routing = run_prepare_stage(
+            pdf_bytes, pdf_doc, images, blocks_list, not_extract_list or [], language, prepared
+        )
+        for page_idx, block_idx, text in routing.pdf_text_blocks:
+            blocks_list[page_idx][block_idx].content = text
+        ocr_fallback_to_vlm_async: list[tuple[int, int, int]] = []
+        if routing.ocr_blocks:
+            try:
+                hybrid_model = HybridModelSingleton().get_model(lang=language, formula_enable=False)
+                ocr_images_bgr = [
+                    _block_image_to_bgr(img) for (_, _, img, _) in routing.ocr_blocks
+                ]
+                ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=False)[0]
+                for (page_idx, block_idx, _, _), (ocr_text, _) in zip(routing.ocr_blocks, ocr_results):
+                    blocks_list[page_idx][block_idx].content = ocr_text
+            except Exception as e:
+                logger.warning(
+                    f"OCR unavailable ({e}), re-routing {len(routing.ocr_blocks)} blocks to Qwen3-VL"
+                )
+                ocr_fallback_to_vlm_async = [(p, b, f) for (p, b, _, f) in routing.ocr_blocks]
+        vlm_indices_combined_async = list(routing.vlm_indices) + ocr_fallback_to_vlm_async
+        if vlm_indices_combined_async:
+            vlm_images = [all_images[f] for (_, _, f) in vlm_indices_combined_async]
+            vlm_prompts = [all_prompts[f] for (_, _, f) in vlm_indices_combined_async]
+            vlm_params = [all_params[f] for (_, _, f) in vlm_indices_combined_async]
+            vlm_indices_map = [(p, b) for (p, b, _) in vlm_indices_combined_async]
+            batch_size = _get_extraction_batch_size()
+            if batch_size > 0:
+                vlm_outputs = []
+                for i in range(0, len(vlm_images), batch_size):
+                    chunk_out = await extraction_client.client.aio_batch_predict(
+                        vlm_images[i : i + batch_size],
+                        vlm_prompts[i : i + batch_size],
+                        vlm_params[i : i + batch_size],
+                        None,
+                        semaphore=semaphore,
+                        use_tqdm=False,
+                    )
+                    vlm_outputs.extend(chunk_out)
+                    if i + batch_size < len(vlm_images):
+                        await asyncio.sleep(0.1)
+            else:
+                vlm_outputs = await extraction_client.client.aio_batch_predict(
+                    vlm_images, vlm_prompts, vlm_params, None, semaphore=semaphore,
+                    use_tqdm=True, tqdm_desc="Extraction",
+                )
+            for (page_idx, block_idx), output in zip(vlm_indices_map, vlm_outputs):
+                blocks_list[page_idx][block_idx].content = output
+        logger.info(
+            f"Smart routing complete: {len(routing.pdf_text_blocks)} blocks extracted using PDF text, "
+            f"{len(routing.ocr_blocks)} blocks sent to OCR, {len(routing.vlm_indices)} blocks sent to Qwen3-VL"
+        )
+    else:
+        batch_size = _get_extraction_batch_size()
+        logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL" + (
+            f" in batches of {batch_size}" if batch_size > 0 else ""
+        ))
+        if batch_size > 0:
+            outputs = []
+            for i in range(0, n_blocks, batch_size):
+                chunk_images = all_images[i : i + batch_size]
+                chunk_prompts = all_prompts[i : i + batch_size]
+                chunk_params = all_params[i : i + batch_size]
+                chunk_out = await extraction_client.client.aio_batch_predict(
+                    chunk_images, chunk_prompts, chunk_params, None, semaphore=semaphore,
+                    use_tqdm=False,
+                )
+                outputs.extend(chunk_out)
+                if i + batch_size < n_blocks:
+                    await asyncio.sleep(0.1)
+        else:
+            outputs = await extraction_client.client.aio_batch_predict(
+                all_images, all_prompts, all_params, None, semaphore=semaphore,
+                use_tqdm=True, tqdm_desc="Extraction",
+            )
+        logger.info(f"Extraction: completed {len(outputs)} blocks")
+        for (page_idx, block_idx), output in zip(all_indices, outputs):
+            blocks_list[page_idx][block_idx].content = output
     post_processed = await asyncio.gather(*[
         layout_client.helper.aio_post_process(layout_client.executor, blocks)
         for blocks in blocks_list
@@ -581,7 +756,13 @@ def doc_analyze(
                 del os.environ["MINERU_VL_API_KEY"]
         split_not_extract = _build_split_not_extract_list()
         results = _batch_split_layout_extract(
-            layout_predictor, extraction_predictor, images_pil_list, not_extract_list=split_not_extract
+            layout_predictor,
+            extraction_predictor,
+            images_pil_list,
+            pdf_bytes=pdf_bytes,
+            pdf_doc=pdf_doc,
+            not_extract_list=split_not_extract,
+            language=language,
         )
         hybrid_pipeline_model = None
         inline_formula_list = [[] for _ in images_pil_list]
@@ -712,7 +893,13 @@ async def aio_doc_analyze(
                 del os.environ["MINERU_VL_API_KEY"]
         split_not_extract = _build_split_not_extract_list()
         results = await _aio_batch_split_layout_extract(
-            layout_predictor, extraction_predictor, images_pil_list, not_extract_list=split_not_extract
+            layout_predictor,
+            extraction_predictor,
+            images_pil_list,
+            pdf_bytes=pdf_bytes,
+            pdf_doc=pdf_doc,
+            not_extract_list=split_not_extract,
+            language=language,
         )
         hybrid_pipeline_model = None
         inline_formula_list = [[] for _ in images_pil_list]
