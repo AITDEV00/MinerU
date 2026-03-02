@@ -487,7 +487,7 @@ def _batch_split_layout_extract(
     """Layout via MinerU2.5, extraction via Qwen3-VL. Supports batched extraction via MINERU_VL_EXTRACTION_BATCH_SIZE.
     When MINERU_VL_SMART_ROUTING_ENABLE is set, routes blocks to PDF text extraction, OCR, or Qwen3-VL."""
     blocks_list = layout_client.batch_layout_detect(images)
-    logger.info("Extract Preparation: preparing block crops for extraction")
+    logger.info("[1/4] Preparing block crops for extraction")
     prepared = layout_client.helper.batch_prepare_for_extract(
         layout_client.executor, images, blocks_list, not_extract_list
     )
@@ -505,6 +505,7 @@ def _batch_split_layout_extract(
         )
         for page_idx, block_idx, text in routing.pdf_text_blocks:
             blocks_list[page_idx][block_idx].content = text
+        logger.info(f"[2/4] PDF text: extracted {len(routing.pdf_text_blocks)} blocks")
         ocr_fallback_to_vlm: list[tuple[int, int, int]] = []
         if routing.ocr_blocks:
             try:
@@ -512,7 +513,8 @@ def _batch_split_layout_extract(
                 ocr_images_bgr = [
                     _block_image_to_bgr(img) for (_, _, img, _) in routing.ocr_blocks
                 ]
-                ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=False)[0]
+                logger.info(f"[3/4] OCR-rec: processing {len(ocr_images_bgr)} blocks")
+                ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=True, tqdm_desc="OCR-rec")[0]
                 for (page_idx, block_idx, _, _), (ocr_text, _) in zip(routing.ocr_blocks, ocr_results):
                     blocks_list[page_idx][block_idx].content = ocr_text
             except Exception as e:
@@ -527,9 +529,10 @@ def _batch_split_layout_extract(
             vlm_params = [all_params[f] for (_, _, f) in vlm_indices_combined]
             vlm_indices_map = [(p, b) for (p, b, _) in vlm_indices_combined]
             batch_size = _get_extraction_batch_size()
+            logger.info(f"[4/4] Qwen3-VL extraction: {len(vlm_images)} blocks")
             if batch_size > 0:
                 vlm_outputs = []
-                for i in range(0, len(vlm_images), batch_size):
+                for i in tqdm(range(0, len(vlm_images), batch_size), desc="Qwen3-VL Extraction", unit="batch"):
                     chunk_out = extraction_client.client.batch_predict(
                         vlm_images[i : i + batch_size],
                         vlm_prompts[i : i + batch_size],
@@ -556,7 +559,7 @@ def _batch_split_layout_extract(
         ))
         if batch_size > 0:
             outputs = []
-            for i in range(0, n_blocks, batch_size):
+            for i in tqdm(range(0, n_blocks, batch_size), desc="Qwen3-VL Extraction", unit="batch"):
                 chunk_images = all_images[i : i + batch_size]
                 chunk_prompts = all_prompts[i : i + batch_size]
                 chunk_params = all_params[i : i + batch_size]
@@ -588,7 +591,7 @@ async def _aio_batch_split_layout_extract(
     When MINERU_VL_SMART_ROUTING_ENABLE is set, routes blocks to PDF text extraction, OCR, or Qwen3-VL."""
     semaphore = semaphore or asyncio.Semaphore(layout_client.max_concurrency)
     blocks_list = await layout_client.aio_batch_layout_detect(images, semaphore=semaphore)
-    logger.info("Extract Preparation: preparing block crops for extraction")
+    logger.info("[1/4] Preparing block crops for extraction")
     prepared = await asyncio.gather(*[
         layout_client.helper.aio_prepare_for_extract(
             layout_client.executor, images[i], blocks_list[i], not_extract_list
@@ -609,6 +612,7 @@ async def _aio_batch_split_layout_extract(
         )
         for page_idx, block_idx, text in routing.pdf_text_blocks:
             blocks_list[page_idx][block_idx].content = text
+        logger.info(f"[2/4] PDF text: extracted {len(routing.pdf_text_blocks)} blocks")
         ocr_fallback_to_vlm_async: list[tuple[int, int, int]] = []
         if routing.ocr_blocks:
             try:
@@ -616,7 +620,8 @@ async def _aio_batch_split_layout_extract(
                 ocr_images_bgr = [
                     _block_image_to_bgr(img) for (_, _, img, _) in routing.ocr_blocks
                 ]
-                ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=False)[0]
+                logger.info(f"[3/4] OCR-rec: processing {len(ocr_images_bgr)} blocks")
+                ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=True, tqdm_desc="OCR-rec")[0]
                 for (page_idx, block_idx, _, _), (ocr_text, _) in zip(routing.ocr_blocks, ocr_results):
                     blocks_list[page_idx][block_idx].content = ocr_text
             except Exception as e:
@@ -631,9 +636,10 @@ async def _aio_batch_split_layout_extract(
             vlm_params = [all_params[f] for (_, _, f) in vlm_indices_combined_async]
             vlm_indices_map = [(p, b) for (p, b, _) in vlm_indices_combined_async]
             batch_size = _get_extraction_batch_size()
+            logger.info(f"[4/4] Qwen3-VL extraction: {len(vlm_images)} blocks")
             if batch_size > 0:
                 vlm_outputs = []
-                for i in range(0, len(vlm_images), batch_size):
+                for i in tqdm(range(0, len(vlm_images), batch_size), desc="Qwen3-VL Extraction", unit="batch"):
                     chunk_out = await extraction_client.client.aio_batch_predict(
                         vlm_images[i : i + batch_size],
                         vlm_prompts[i : i + batch_size],
@@ -648,7 +654,7 @@ async def _aio_batch_split_layout_extract(
             else:
                 vlm_outputs = await extraction_client.client.aio_batch_predict(
                     vlm_images, vlm_prompts, vlm_params, None, semaphore=semaphore,
-                    use_tqdm=True, tqdm_desc="Extraction",
+                    use_tqdm=True, tqdm_desc="Qwen3-VL Extraction",
                 )
             for (page_idx, block_idx), output in zip(vlm_indices_map, vlm_outputs):
                 blocks_list[page_idx][block_idx].content = output
@@ -663,7 +669,7 @@ async def _aio_batch_split_layout_extract(
         ))
         if batch_size > 0:
             outputs = []
-            for i in range(0, n_blocks, batch_size):
+            for i in tqdm(range(0, n_blocks, batch_size), desc="Qwen3-VL Extraction", unit="batch"):
                 chunk_images = all_images[i : i + batch_size]
                 chunk_prompts = all_prompts[i : i + batch_size]
                 chunk_params = all_params[i : i + batch_size]
@@ -677,7 +683,7 @@ async def _aio_batch_split_layout_extract(
         else:
             outputs = await extraction_client.client.aio_batch_predict(
                 all_images, all_prompts, all_params, None, semaphore=semaphore,
-                use_tqdm=True, tqdm_desc="Extraction",
+                use_tqdm=True, tqdm_desc="Qwen3-VL Extraction",
             )
         logger.info(f"Extraction: completed {len(outputs)} blocks")
         for (page_idx, block_idx), output in zip(all_indices, outputs):
