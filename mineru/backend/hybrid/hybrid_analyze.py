@@ -25,6 +25,7 @@ from mineru.utils.pdf_image_tools import load_images_from_pdf
 
 from mineru.backend.hybrid.extraction_routing import (
     is_smart_routing_enabled,
+    log_vlm_batch_breakdown,
     run_prepare_stage,
 )
 
@@ -458,6 +459,83 @@ def _get_layout_server_url(server_url: str | None) -> tuple[str | None, dict | N
     return url, headers
 
 
+def _block_set_extraction_route(block, route: str) -> None:
+    """Tag layout block with how content was produced (for middle JSON / debug PDF)."""
+    if isinstance(block, dict):
+        block["extraction_route"] = route
+    else:
+        setattr(block, "extraction_route", route)
+
+
+def _block_get_extraction_route(block):
+    if isinstance(block, dict):
+        return block.get("extraction_route")
+    return getattr(block, "extraction_route", None)
+
+
+def _apply_extraction_route_tags(
+    blocks_list: list,
+    routing,
+    ocr_fallback_to_vlm: list[tuple[int, int, int]],
+    ocr_empty_fallback: list[tuple[int, int, int]],
+) -> None:
+    """After split extract, record pdf_text / ocr / qwen3_vl* on each block (smart routing only)."""
+    ocr_failed_pb = {(p, b) for p, b, f in ocr_fallback_to_vlm} | {(p, b) for p, b, f in ocr_empty_fallback}
+    for p, b, _ in routing.pdf_text_blocks:
+        if p < len(blocks_list) and b < len(blocks_list[p]):
+            _block_set_extraction_route(blocks_list[p][b], "pdf_text")
+    for p, b, _, _ in routing.ocr_blocks:
+        if p < len(blocks_list) and b < len(blocks_list[p]) and (p, b) not in ocr_failed_pb:
+            _block_set_extraction_route(blocks_list[p][b], "ocr")
+    for p, b, _ in ocr_fallback_to_vlm:
+        if p < len(blocks_list) and b < len(blocks_list[p]):
+            _block_set_extraction_route(blocks_list[p][b], "qwen3_vl_ocr_unavailable")
+    for p, b, _ in ocr_empty_fallback:
+        if p < len(blocks_list) and b < len(blocks_list[p]):
+            _block_set_extraction_route(blocks_list[p][b], "qwen3_vl_after_empty_ocr")
+    for p, b, _ in routing.vlm_indices:
+        if p < len(blocks_list) and b < len(blocks_list[p]):
+            bl = blocks_list[p][b]
+            if not _block_get_extraction_route(bl):
+                _block_set_extraction_route(bl, "qwen3_vl")
+
+
+def _assign_ocr_blocks_or_empty_fallback(
+    routing_ocr_blocks: list,
+    ocr_results,
+    blocks_list: list,
+) -> list[tuple[int, int, int]]:
+    """
+    Assign OCR text to blocks; return (page_idx, block_idx, flat_idx) for blocks where OCR
+    returned empty so they can be sent to Qwen3-VL (avoids silent loss of body text).
+    """
+    fallback: list[tuple[int, int, int]] = []
+    if not routing_ocr_blocks:
+        return fallback
+    if not isinstance(ocr_results, (list, tuple)) or len(ocr_results) != len(routing_ocr_blocks):
+        logger.warning(
+            f"OCR result count mismatch ({len(ocr_results) if isinstance(ocr_results, (list, tuple)) else '?'} "
+            f"vs {len(routing_ocr_blocks)} blocks); sending all OCR-routed blocks to Qwen3-VL"
+        )
+        return [(p, b, f) for (p, b, _, f) in routing_ocr_blocks]
+    for (page_idx, block_idx, _, flat_idx), rec in zip(routing_ocr_blocks, ocr_results):
+        ocr_text = ""
+        try:
+            if rec is not None:
+                ocr_text = rec[0] if isinstance(rec, (list, tuple)) and len(rec) > 0 else str(rec)
+        except (TypeError, IndexError):
+            ocr_text = ""
+        if ocr_text is None:
+            ocr_text = ""
+        if str(ocr_text).strip():
+            blocks_list[page_idx][block_idx].content = ocr_text
+        else:
+            fallback.append((page_idx, block_idx, flat_idx))
+    if fallback:
+        logger.info(f"OCR returned empty for {len(fallback)} blocks; sending those to Qwen3-VL")
+    return fallback
+
+
 def _get_extraction_batch_size() -> int:
     """Get extraction batch size from env (0 = no chunking, process all at once)."""
     return max(0, int(os.getenv("MINERU_VL_EXTRACTION_BATCH_SIZE", "8")))
@@ -507,6 +585,7 @@ def _batch_split_layout_extract(
             blocks_list[page_idx][block_idx].content = text
         logger.info(f"[2/4] PDF text: extracted {len(routing.pdf_text_blocks)} blocks")
         ocr_fallback_to_vlm: list[tuple[int, int, int]] = []
+        ocr_empty_fallback: list[tuple[int, int, int]] = []
         if routing.ocr_blocks:
             try:
                 hybrid_model = HybridModelSingleton().get_model(lang=language, formula_enable=False)
@@ -515,14 +594,23 @@ def _batch_split_layout_extract(
                 ]
                 logger.info(f"[3/4] OCR-rec: processing {len(ocr_images_bgr)} blocks")
                 ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=True, tqdm_desc="OCR-rec")[0]
-                for (page_idx, block_idx, _, _), (ocr_text, _) in zip(routing.ocr_blocks, ocr_results):
-                    blocks_list[page_idx][block_idx].content = ocr_text
+                ocr_empty_fallback = _assign_ocr_blocks_or_empty_fallback(
+                    routing.ocr_blocks, ocr_results, blocks_list
+                )
             except Exception as e:
                 logger.warning(
                     f"OCR unavailable ({e}), re-routing {len(routing.ocr_blocks)} blocks to Qwen3-VL"
                 )
                 ocr_fallback_to_vlm = [(p, b, f) for (p, b, _, f) in routing.ocr_blocks]
-        vlm_indices_combined = list(routing.vlm_indices) + ocr_fallback_to_vlm
+                ocr_empty_fallback = []
+        vlm_indices_combined = list(routing.vlm_indices) + ocr_fallback_to_vlm + ocr_empty_fallback
+        log_vlm_batch_breakdown(
+            blocks_list,
+            vlm_indices_combined,
+            routing.vlm_indices,
+            ocr_fallback_to_vlm,
+            ocr_empty_fallback,
+        )
         if vlm_indices_combined:
             vlm_images = [all_images[f] for (_, _, f) in vlm_indices_combined]
             vlm_prompts = [all_prompts[f] for (_, _, f) in vlm_indices_combined]
@@ -549,9 +637,11 @@ def _batch_split_layout_extract(
             for (page_idx, block_idx), output in zip(vlm_indices_map, vlm_outputs):
                 blocks_list[page_idx][block_idx].content = output
         logger.info(
-            f"Smart routing complete: {len(routing.pdf_text_blocks)} blocks extracted using PDF text, "
-            f"{len(routing.ocr_blocks)} blocks sent to OCR, {len(routing.vlm_indices)} blocks sent to Qwen3-VL"
+            f"Smart routing complete: {len(routing.pdf_text_blocks)} blocks via PDF text, "
+            f"{len(routing.ocr_blocks)} via OCR (empty OCR → VLM: {len(ocr_empty_fallback)}), "
+            f"{len(vlm_indices_combined)} total to Qwen3-VL"
         )
+        _apply_extraction_route_tags(blocks_list, routing, ocr_fallback_to_vlm, ocr_empty_fallback)
     else:
         batch_size = _get_extraction_batch_size()
         logger.info(f"Extraction: sending {n_blocks} blocks to Qwen3-VL" + (
@@ -574,6 +664,7 @@ def _batch_split_layout_extract(
         logger.info(f"Extraction: completed {len(outputs)} blocks")
         for (page_idx, block_idx), output in zip(all_indices, outputs):
             blocks_list[page_idx][block_idx].content = output
+            _block_set_extraction_route(blocks_list[page_idx][block_idx], "qwen3_vl")
     return layout_client.helper.batch_post_process(layout_client.executor, blocks_list)
 
 
@@ -614,6 +705,7 @@ async def _aio_batch_split_layout_extract(
             blocks_list[page_idx][block_idx].content = text
         logger.info(f"[2/4] PDF text: extracted {len(routing.pdf_text_blocks)} blocks")
         ocr_fallback_to_vlm_async: list[tuple[int, int, int]] = []
+        ocr_empty_fallback_async: list[tuple[int, int, int]] = []
         if routing.ocr_blocks:
             try:
                 hybrid_model = HybridModelSingleton().get_model(lang=language, formula_enable=False)
@@ -622,14 +714,25 @@ async def _aio_batch_split_layout_extract(
                 ]
                 logger.info(f"[3/4] OCR-rec: processing {len(ocr_images_bgr)} blocks")
                 ocr_results = hybrid_model.ocr_model.ocr(ocr_images_bgr, det=False, tqdm_enable=True, tqdm_desc="OCR-rec")[0]
-                for (page_idx, block_idx, _, _), (ocr_text, _) in zip(routing.ocr_blocks, ocr_results):
-                    blocks_list[page_idx][block_idx].content = ocr_text
+                ocr_empty_fallback_async = _assign_ocr_blocks_or_empty_fallback(
+                    routing.ocr_blocks, ocr_results, blocks_list
+                )
             except Exception as e:
                 logger.warning(
                     f"OCR unavailable ({e}), re-routing {len(routing.ocr_blocks)} blocks to Qwen3-VL"
                 )
                 ocr_fallback_to_vlm_async = [(p, b, f) for (p, b, _, f) in routing.ocr_blocks]
-        vlm_indices_combined_async = list(routing.vlm_indices) + ocr_fallback_to_vlm_async
+                ocr_empty_fallback_async = []
+        vlm_indices_combined_async = (
+            list(routing.vlm_indices) + ocr_fallback_to_vlm_async + ocr_empty_fallback_async
+        )
+        log_vlm_batch_breakdown(
+            blocks_list,
+            vlm_indices_combined_async,
+            routing.vlm_indices,
+            ocr_fallback_to_vlm_async,
+            ocr_empty_fallback_async,
+        )
         if vlm_indices_combined_async:
             vlm_images = [all_images[f] for (_, _, f) in vlm_indices_combined_async]
             vlm_prompts = [all_prompts[f] for (_, _, f) in vlm_indices_combined_async]
@@ -659,8 +762,12 @@ async def _aio_batch_split_layout_extract(
             for (page_idx, block_idx), output in zip(vlm_indices_map, vlm_outputs):
                 blocks_list[page_idx][block_idx].content = output
         logger.info(
-            f"Smart routing complete: {len(routing.pdf_text_blocks)} blocks extracted using PDF text, "
-            f"{len(routing.ocr_blocks)} blocks sent to OCR, {len(routing.vlm_indices)} blocks sent to Qwen3-VL"
+            f"Smart routing complete: {len(routing.pdf_text_blocks)} blocks via PDF text, "
+            f"{len(routing.ocr_blocks)} via OCR (empty OCR → VLM: {len(ocr_empty_fallback_async)}), "
+            f"{len(vlm_indices_combined_async)} total to Qwen3-VL"
+        )
+        _apply_extraction_route_tags(
+            blocks_list, routing, ocr_fallback_to_vlm_async, ocr_empty_fallback_async
         )
     else:
         batch_size = _get_extraction_batch_size()
@@ -688,10 +795,18 @@ async def _aio_batch_split_layout_extract(
         logger.info(f"Extraction: completed {len(outputs)} blocks")
         for (page_idx, block_idx), output in zip(all_indices, outputs):
             blocks_list[page_idx][block_idx].content = output
+            _block_set_extraction_route(blocks_list[page_idx][block_idx], "qwen3_vl")
     post_processed = await asyncio.gather(*[
         layout_client.helper.aio_post_process(layout_client.executor, blocks)
         for blocks in blocks_list
     ])
+    for page_idx, new_blocks in enumerate(post_processed):
+        old_blocks = blocks_list[page_idx]
+        if len(new_blocks) == len(old_blocks):
+            for old_b, new_b in zip(old_blocks, new_blocks):
+                r = _block_get_extraction_route(old_b)
+                if r:
+                    _block_set_extraction_route(new_b, r)
     return list(post_processed)
 
 

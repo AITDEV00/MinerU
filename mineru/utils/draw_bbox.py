@@ -392,6 +392,90 @@ def draw_span_bbox(pdf_info, pdf_bytes, out_path, filename):
         output_pdf.write(f)
 
 
+# Smart-routing debug: colors match hybrid split extract (extraction_route on blocks)
+_EXTRACTION_ROUTE_RGB = {
+    "pdf_text": [0, 170, 0],
+    "ocr": [30, 144, 255],
+    "qwen3_vl": [220, 20, 20],
+    "qwen3_vl_ocr_unavailable": [255, 140, 0],
+    "qwen3_vl_after_empty_ocr": [160, 32, 240],
+}
+_UNKNOWN_ROUTE_RGB = [140, 140, 140]
+
+
+def _collect_extraction_routes_from_block(block: dict, acc: list) -> None:
+    r = block.get("extraction_route")
+    bb = block.get("bbox")
+    if r and bb is not None:
+        acc.append((bb, r))
+    for sub in block.get("blocks") or []:
+        _collect_extraction_routes_from_block(sub, acc)
+
+
+def draw_extraction_route_bbox(pdf_info, pdf_bytes, out_path, filename):
+    """
+    Overlay block bboxes colored by extraction_route (pdf_text / ocr / qwen3_vl / ...).
+    Requires hybrid split path with smart routing and middle_json that preserved extraction_route.
+    """
+    per_page_routes: list[list] = []
+    for page in pdf_info:
+        acc = []
+        for block in page.get("para_blocks", []):
+            _collect_extraction_routes_from_block(block, acc)
+        for block in page.get("discarded_blocks", []):
+            _collect_extraction_routes_from_block(block, acc)
+        per_page_routes.append(acc)
+
+    pdf_bytes_io = BytesIO(pdf_bytes)
+    pdf_docs = PdfReader(pdf_bytes_io)
+    output_pdf = PdfWriter()
+
+    for i, page in enumerate(pdf_docs.pages):
+        page_width = float(page.cropbox[2])
+        page_height = float(page.cropbox[3])
+        custom_page_size = (page_width, page_height)
+        packet = BytesIO()
+        c = canvas.Canvas(packet, pagesize=custom_page_size)
+        routes = per_page_routes[i] if i < len(per_page_routes) else []
+        for bbox, route in routes:
+            rgb = _EXTRACTION_ROUTE_RGB.get(route, _UNKNOWN_ROUTE_RGB)
+            nr = [float(x) / 255 for x in rgb]
+            rect = cal_canvas_rect(page, bbox)
+            c.setStrokeColorRGB(nr[0], nr[1], nr[2])
+            c.setLineWidth(1.5)
+            c.rect(rect[0], rect[1], rect[2], rect[3], stroke=1, fill=0)
+        if i == 0:
+            c.setFontSize(7)
+            y = page_height - 10
+            legend = [
+                ("green = pdf_text", "pdf_text"),
+                ("blue = ocr", "ocr"),
+                ("red = qwen3_vl", "qwen3_vl"),
+                ("orange = qwen after OCR unavailable", "qwen3_vl_ocr_unavailable"),
+                ("violet = qwen after empty OCR", "qwen3_vl_after_empty_ocr"),
+            ]
+            for text, key in legend:
+                rgb = _EXTRACTION_ROUTE_RGB.get(key, _UNKNOWN_ROUTE_RGB)
+                nr = [float(x) / 255 for x in rgb]
+                c.setFillColorRGB(nr[0], nr[1], nr[2])
+                c.drawString(6, y, text)
+                y -= 9
+        c.save()
+        packet.seek(0)
+        overlay_pdf = PdfReader(packet)
+        if len(overlay_pdf.pages) > 0:
+            new_page = PageObject(pdf=None)
+            new_page.update(page)
+            page_m = new_page
+            page_m.merge_page(overlay_pdf.pages[0])
+        else:
+            page_m = page
+        output_pdf.add_page(page_m)
+
+    with open(f"{out_path}/{filename}", "wb") as f:
+        output_pdf.write(f)
+
+
 def draw_line_sort_bbox(pdf_info, pdf_bytes, out_path, filename):
     layout_bbox_list = []
 

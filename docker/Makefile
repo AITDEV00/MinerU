@@ -32,7 +32,7 @@ build:
 	$(RUNTIME) build -f Dockerfile.api -t $(NAME):$(DATE) -t $(NAME):latest ..
 
 login:
-	$(RUNTIME) login $(REGISTRY)
+	$(RUNTIME) login --tls-verify=false $(REGISTRY)
 
 push: build
 	@echo "Pushing to $(REPO)..."

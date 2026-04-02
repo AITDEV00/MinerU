@@ -15,9 +15,11 @@ services:
     ports:
       - "8085:8000"
     environment:
-      - MINERU_VL_SERVER=${MINERU_VL_SERVER:-https://inference.adeoaiengine.ecouncil.ae/models/0f8674c2-5fb8-43c7-bf2d-a6e5db2c0ff4/proxy/}
-      - MINERU_VL_SERVER_EXTRACTION=${MINERU_VL_SERVER_EXTRACTION:-https://inference.adeoaiengine.ecouncil.ae/models/91c6dca7-b1c4-4e0b-8fec-11e8b82448f2/proxy/}
-      - MINERU_VL_MODEL_NAME_EXTRACTION=${MINERU_VL_MODEL_NAME_EXTRACTION:-Qwen/Qwen3-VL-30B-A3B-Instruct}
+      - MINERU_VL_SERVER=https://inference.adeoaiengine.ecouncil.ae/models/0f8674c2-5fb8-43c7-bf2d-a6e5db2c0ff4/proxy/
+      - MINERU_VL_API_KEY=sk-uLOcSoGPJsxot-7DDJ-bv9owxO79kSbYmOyzdaW5AQk
+      - MINERU_VL_SERVER_EXTRACTION=https://inference.adeoaiengine.ecouncil.ae/models/91c6dca7-b1c4-4e0b-8fec-11e8b82448f2/proxy/
+      - MINERU_VL_MODEL_NAME_EXTRACTION=Qwen/Qwen3-VL-30B-A3B-Instruct
+      - MINERU_VL_API_KEY_EXTRACTION=sk-7jQL7jDlbsKHKU9-oR3_5RdeNMjQ807oCcyXyniC5gM
       - MINERU_DEFAULT_BACKEND=hybrid-http-client
       # local = use models baked in image (air-gapped). Override with huggingface only if you need runtime download.
       - MINERU_MODEL_SOURCE=local

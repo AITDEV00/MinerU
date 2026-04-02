@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from starlette.background import BackgroundTask
-from typing import List, Optional
+from typing import Any, List, Optional
 from loguru import logger
 
 log_level = os.getenv("MINERU_LOG_LEVEL", "INFO").upper()
@@ -68,6 +68,52 @@ def create_app():
     return app
 
 app = create_app()
+
+
+def _fix_openapi_file_uploads_for_swagger_ui(schema: dict[str, Any]) -> None:
+    """
+    FastAPI >= 0.129.1 emits contentMediaType: application/octet-stream for UploadFile;
+    Swagger UI 5.x only renders file pickers for format: binary (see fastapi#14975).
+    Normalize so /docs shows Choose File again.
+    """
+    def fix_node(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("contentMediaType") == "application/octet-stream":
+            node.pop("contentMediaType", None)
+            node.setdefault("type", "string")
+            node["format"] = "binary"
+        for v in node.values():
+            if isinstance(v, dict):
+                fix_node(v)
+            elif isinstance(v, list):
+                for item in v:
+                    fix_node(item)
+
+    fix_node(schema.get("components", {}))
+    fix_node(schema.get("paths", {}))
+
+
+def _install_custom_openapi(application) -> None:
+    """Replace app.openapi so generated schema is Swagger-file-picker compatible."""
+
+    def custom_openapi():
+        if application.openapi_schema:
+            return application.openapi_schema
+        from fastapi.openapi.utils import get_openapi
+
+        openapi_schema = get_openapi(
+            title=application.title,
+            version=getattr(application, "version", "0.1.0"),
+            openapi_version=getattr(application, "openapi_version", "3.1.0"),
+            description=getattr(application, "description", "") or "",
+            routes=application.routes,
+        )
+        _fix_openapi_file_uploads_for_swagger_ui(openapi_schema)
+        application.openapi_schema = openapi_schema
+        return openapi_schema
+
+    application.openapi = custom_openapi  # type: ignore[method-assign]
 
 
 def sanitize_filename(filename: str) -> str:
@@ -178,6 +224,14 @@ async def parse_pdf(
         return_content_list: bool = Form(False, description="Return content list JSON in response"),
         return_images: bool = Form(False, description="Return extracted images in response"),
         response_format_zip: bool = Form(False, description="Return results as a ZIP file instead of JSON"),
+        draw_layout_bbox: bool = Form(
+            False,
+            description="Write {name}_layout.pdf next to outputs (type-colored layout boxes, same as CLI f_draw_layout_bbox).",
+        ),
+        draw_extraction_route_pdf: bool = Form(
+            False,
+            description="Write {name}_extraction_routes.pdf: bbox colors = pdf_text vs ocr vs qwen3_vl (hybrid + parse_method=vlm + smart routing).",
+        ),
         start_page_id: int = Form(0, description="The starting page for PDF parsing, beginning from 0"),
         end_page_id: int = Form(99999, description="The ending page for PDF parsing, beginning from 0"),
 ):
@@ -241,8 +295,9 @@ async def parse_pdf(
             table_enable=table_enable,
             discarded_blocks_enable=discarded_blocks_enable,
             server_url=server_url,
-            f_draw_layout_bbox=False,
+            f_draw_layout_bbox=draw_layout_bbox,
             f_draw_span_bbox=False,
+            f_draw_extraction_route_pdf=draw_extraction_route_pdf,
             f_dump_md=return_md,
             f_dump_middle_json=return_middle_json,
             f_dump_model_output=return_model_output,
@@ -293,6 +348,16 @@ async def parse_pdf(
                         path = os.path.join(parse_dir, f"{pdf_name}_content_list.json")
                         if os.path.exists(path):
                             zf.write(path, arcname=os.path.join(safe_pdf_name, f"{safe_pdf_name}_content_list.json"))
+
+                    if draw_layout_bbox:
+                        path = os.path.join(parse_dir, f"{pdf_name}_layout.pdf")
+                        if os.path.exists(path):
+                            zf.write(path, arcname=os.path.join(safe_pdf_name, f"{pdf_name}_layout.pdf"))
+
+                    if draw_extraction_route_pdf:
+                        path = os.path.join(parse_dir, f"{pdf_name}_extraction_routes.pdf")
+                        if os.path.exists(path):
+                            zf.write(path, arcname=os.path.join(safe_pdf_name, f"{pdf_name}_extraction_routes.pdf"))
 
                     # 写入图片
                     if return_images:
@@ -357,6 +422,9 @@ async def parse_pdf(
             status_code=500,
             content={"error": f"Failed to process file: {str(e)}"}
         )
+
+
+_install_custom_openapi(app)
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))

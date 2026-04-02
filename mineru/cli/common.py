@@ -9,7 +9,12 @@ from loguru import logger
 import pypdfium2 as pdfium
 
 from mineru.data.data_reader_writer import FileBasedDataWriter
-from mineru.utils.draw_bbox import draw_layout_bbox, draw_span_bbox, draw_line_sort_bbox
+from mineru.utils.draw_bbox import (
+    draw_layout_bbox,
+    draw_span_bbox,
+    draw_line_sort_bbox,
+    draw_extraction_route_bbox,
+)
 from mineru.utils.engine_utils import get_vlm_engine
 from mineru.utils.enum_class import MakeMode
 from mineru.utils.guess_suffix_or_lang import guess_suffix_by_bytes
@@ -108,13 +113,19 @@ def _process_output(
         f_make_md_mode,
         middle_json,
         model_output=None,
-        is_pipeline=True
+        is_pipeline=True,
+        f_draw_extraction_route_pdf: bool = False,
 ):
     f_draw_line_sort_bbox = False
     from mineru.backend.pipeline.pipeline_middle_json_mkcontent import union_make as pipeline_union_make
     """处理输出文件"""
     if f_draw_layout_bbox:
         draw_layout_bbox(pdf_info, pdf_bytes, local_md_dir, f"{pdf_file_name}_layout.pdf")
+
+    if f_draw_extraction_route_pdf:
+        draw_extraction_route_bbox(
+            pdf_info, pdf_bytes, local_md_dir, f"{pdf_file_name}_extraction_routes.pdf"
+        )
 
     if f_draw_span_bbox:
         draw_span_bbox(pdf_info, pdf_bytes, local_md_dir, f"{pdf_file_name}_span.pdf")
@@ -321,6 +332,7 @@ def _process_hybrid(
         f_dump_orig_pdf,
         f_dump_content_list,
         f_make_md_mode,
+        f_draw_extraction_route_pdf=False,
         server_url=None,
         **kwargs,
 ):
@@ -354,7 +366,8 @@ def _process_hybrid(
             pdf_info, pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
             md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
             f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-            f_make_md_mode, middle_json, infer_result, is_pipeline=False
+            f_make_md_mode, middle_json, infer_result, is_pipeline=False,
+            f_draw_extraction_route_pdf=f_draw_extraction_route_pdf,
         )
 
 
@@ -374,6 +387,7 @@ async def _async_process_hybrid(
         f_dump_orig_pdf,
         f_dump_content_list,
         f_make_md_mode,
+        f_draw_extraction_route_pdf=False,
         server_url=None,
         **kwargs,
 ):
@@ -407,7 +421,8 @@ async def _async_process_hybrid(
             pdf_info, pdf_bytes, pdf_file_name, local_md_dir, local_image_dir,
             md_writer, f_draw_layout_bbox, f_draw_span_bbox, f_dump_orig_pdf,
             f_dump_md, f_dump_content_list, f_dump_middle_json, f_dump_model_output,
-            f_make_md_mode, middle_json, infer_result, is_pipeline=False
+            f_make_md_mode, middle_json, infer_result, is_pipeline=False,
+            f_draw_extraction_route_pdf=f_draw_extraction_route_pdf,
         )
 
 
@@ -423,6 +438,7 @@ def do_parse(
         server_url=None,
         f_draw_layout_bbox=True,
         f_draw_span_bbox=True,
+        f_draw_extraction_route_pdf=False,
         f_dump_md=True,
         f_dump_middle_json=True,
         f_dump_model_output=True,
@@ -479,6 +495,7 @@ def do_parse(
                 output_dir, pdf_file_names, pdf_bytes_list, p_lang_list, parse_method, formula_enable, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
                 f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
+                f_draw_extraction_route_pdf,
                 server_url, **kwargs,
             )
 
@@ -495,6 +512,7 @@ async def aio_do_parse(
         server_url=None,
         f_draw_layout_bbox=True,
         f_draw_span_bbox=True,
+        f_draw_extraction_route_pdf=False,
         f_dump_md=True,
         f_dump_middle_json=True,
         f_dump_model_output=True,
@@ -551,6 +569,7 @@ async def aio_do_parse(
                 output_dir, pdf_file_names, pdf_bytes_list, p_lang_list, parse_method, formula_enable, backend,
                 f_draw_layout_bbox, f_draw_span_bbox, f_dump_md, f_dump_middle_json,
                 f_dump_model_output, f_dump_orig_pdf, f_dump_content_list, f_make_md_mode,
+                f_draw_extraction_route_pdf,
                 server_url, **kwargs,
             )
 

@@ -68,6 +68,11 @@ class MagicModel:
                 block_type = block_info["type"]
                 block_content = block_info["content"]
                 block_angle = block_info["angle"]
+                _extraction_route = None
+                if isinstance(block_info, dict):
+                    _extraction_route = block_info.get("extraction_route")
+                elif hasattr(block_info, "extraction_route"):
+                    _extraction_route = getattr(block_info, "extraction_route", None)
 
                 # print(f"坐标: {block_bbox}")
                 # print(f"类型: {block_type}")
@@ -221,6 +226,8 @@ class MagicModel:
                     "lines": [line],
                     "index": index,
                 }
+                if _extraction_route:
+                    block["extraction_route"] = _extraction_route
 
             else:  #  使用span填充方式
                 block_spans = []
@@ -240,6 +247,8 @@ class MagicModel:
                     "index": index,
                 }
                 block = fix_text_block(block)
+                if _extraction_route:
+                    block["extraction_route"] = _extraction_route
 
             blocks.append(block)
 

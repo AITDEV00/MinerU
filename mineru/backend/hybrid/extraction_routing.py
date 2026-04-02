@@ -5,6 +5,7 @@ PDF text extraction, OCR, or Qwen3-VL based on content type and language.
 """
 
 import os
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,77 @@ VLM_ONLY_TYPES = frozenset([
 
 # Min chars to consider PDF text "meaningful"
 MIN_PDF_TEXT_LEN = 3
+
+
+def _block_type_str(block) -> str:
+    """Human-readable layout block type for logging and routing (empty if unset)."""
+    bt = getattr(block, "type", None) or (block.type if hasattr(block, "type") else "")
+    if bt is None or bt == "":
+        return ""
+    return bt.value if hasattr(bt, "value") else str(bt)
+
+
+def log_smart_routing_type_breakdown(result: "RoutingResult", blocks_list: list) -> None:
+    """Log how many blocks of each layout type go to PDF text vs OCR vs Qwen3-VL (initial route)."""
+    pdf_c: Counter = Counter()
+    for page_idx, block_idx, _ in result.pdf_text_blocks:
+        if page_idx < len(blocks_list) and block_idx < len(blocks_list[page_idx]):
+            t = _block_type_str(blocks_list[page_idx][block_idx]) or "unknown"
+            pdf_c[t] += 1
+    ocr_c: Counter = Counter()
+    for page_idx, block_idx, _, _ in result.ocr_blocks:
+        if page_idx < len(blocks_list) and block_idx < len(blocks_list[page_idx]):
+            t = _block_type_str(blocks_list[page_idx][block_idx]) or "unknown"
+            ocr_c[t] += 1
+    vlm_c: Counter = Counter()
+    for page_idx, block_idx, _ in result.vlm_indices:
+        if page_idx < len(blocks_list) and block_idx < len(blocks_list[page_idx]):
+            t = _block_type_str(blocks_list[page_idx][block_idx]) or "unknown"
+            vlm_c[t] += 1
+    logger.info(
+        "Smart routing by block type — "
+        f"PDF text path: {dict(pdf_c)} | "
+        f"OCR path: {dict(ocr_c)} | "
+        f"Qwen3-VL path (initial): {dict(vlm_c)}"
+    )
+
+
+def log_vlm_batch_breakdown(
+    blocks_list: list,
+    vlm_combined: list[tuple[int, int, int]],
+    routing_vlm: list[tuple[int, int, int]],
+    ocr_unavailable_fallback: list[tuple[int, int, int]],
+    ocr_empty_fallback: list[tuple[int, int, int]],
+) -> None:
+    """
+    Log why each block in the final Qwen3-VL batch was sent there:
+    vlm_direct (type/language/pdf rules), ocr_unavailable, ocr_empty.
+    """
+    if not vlm_combined:
+        return
+    direct_set = set(map(tuple, routing_vlm))
+    ocr_unavail_set = set(map(tuple, ocr_unavailable_fallback))
+    ocr_empty_set = set(map(tuple, ocr_empty_fallback))
+    by_reason: Counter = Counter()
+    by_type_reason: dict[str, Counter] = defaultdict(Counter)
+    for p, b, f in vlm_combined:
+        key = (p, b, f)
+        if key in direct_set:
+            reason = "vlm_direct"
+        elif key in ocr_unavail_set:
+            reason = "ocr_unavailable_fallback"
+        elif key in ocr_empty_set:
+            reason = "ocr_empty_fallback"
+        else:
+            reason = "unknown"
+        by_reason[reason] += 1
+        if p < len(blocks_list) and b < len(blocks_list[p]):
+            bt = _block_type_str(blocks_list[p][b]) or "unknown"
+            by_type_reason[bt][reason] += 1
+    detail = {bt: dict(by_type_reason[bt]) for bt in sorted(by_type_reason)}
+    logger.info(
+        f"Qwen3-VL batch reasons: {dict(by_reason)} | per block type: {detail}"
+    )
 
 
 @dataclass
@@ -134,8 +206,7 @@ def run_prepare_stage(
                 flat_idx += 1
                 continue
             block = blocks[block_idx]
-            bt = getattr(block, "type", None) or (block.type if hasattr(block, "type") else "")
-            block_type = bt.value if hasattr(bt, "value") else str(bt) if bt else ""
+            block_type = _block_type_str(block)
 
             # Skip blocks in not_extract_list
             if not_extract_list and block_type in not_extract_list:
@@ -162,7 +233,8 @@ def run_prepare_stage(
                 except Exception as e:
                     logger.debug(f"PDF extract for block ({page_idx},{block_idx}): {e}")
 
-            if pdf_text and len(pdf_text) >= MIN_PDF_TEXT_LEN:
+            # Use stripped length so whitespace-only PDF matches do not skip OCR/VLM
+            if pdf_text and len(pdf_text.strip()) >= MIN_PDF_TEXT_LEN:
                 detected = detect_lang(pdf_text)
                 if detected in ("en", "zh", "ja", "ko", "th", "el", "fr", "de", "es", "it"):
                     result.pdf_text_blocks.append((page_idx, block_idx, pdf_text))
@@ -188,6 +260,7 @@ def run_prepare_stage(
 
             flat_idx += 1
 
+    log_smart_routing_type_breakdown(result, blocks_list)
     return result
 
 
