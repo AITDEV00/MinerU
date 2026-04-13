@@ -1,6 +1,7 @@
 # MinerU API with parse_method=vlm (Split Layout + Extraction)
 # Build: make build-split-vlm
-# Run:   make run-split-vlm
+# Run:   make run-split-vlm  (sets MINERU_SPLIT_TAG to today's dd-mm-YYYY)
+# Manual: MINERU_SPLIT_TAG=01-04-2026 docker compose -f docker-compose.api-split-vlm.yml up -d
 # Stop:  make run-split-vlm-down
 
 services:
@@ -10,7 +11,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.api-split-vlm
-    image: adeo-mineru-api:split-vlm
+    image: adeo-mineru-api:${MINERU_SPLIT_TAG:-latest}
     container_name: mineru-api-split-vlm
     ports:
       - "8085:8000"

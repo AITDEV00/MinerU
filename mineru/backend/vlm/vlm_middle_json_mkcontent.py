@@ -23,31 +23,47 @@ inline_right_delimiter = delimiters['inline']['right']
 
 
 def merge_para_with_text(para_block, formula_enable=True, img_buket_path=''):
+    if not para_block or not isinstance(para_block, dict):
+        return ''
+    lines = para_block.get('lines')
+    if not lines:
+        return ''
+
     block_text = ''
-    for line in para_block['lines']:
-        for span in line['spans']:
-            if span['type'] in [ContentType.TEXT]:
-                span['content'] = full_to_half_exclude_marks(span['content'])
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        for span in line.get('spans') or []:
+            if not isinstance(span, dict):
+                continue
+            if span.get('type') in [ContentType.TEXT]:
+                raw = span.get('content') or ''
+                span['content'] = full_to_half_exclude_marks(raw)
                 block_text += span['content']
     block_lang = detect_lang(block_text)
 
     para_text = ''
-    for i, line in enumerate(para_block['lines']):
-        for j, span in enumerate(line['spans']):
-            span_type = span['type']
+    for i, line in enumerate(lines):
+        if not isinstance(line, dict):
+            continue
+        spans = line.get('spans') or []
+        for j, span in enumerate(spans):
+            if not isinstance(span, dict):
+                continue
+            span_type = span.get('type')
             content = ''
             if span_type == ContentType.TEXT:
-                content = span['content']
+                content = span.get('content') or ''
             elif span_type == ContentType.INLINE_EQUATION:
-                content = f"{inline_left_delimiter}{span['content']}{inline_right_delimiter}"
+                content = f"{inline_left_delimiter}{span.get('content') or ''}{inline_right_delimiter}"
             elif span_type == ContentType.INTERLINE_EQUATION:
                 if formula_enable:
-                    content = f"\n{display_left_delimiter}\n{span['content']}\n{display_right_delimiter}\n"
+                    content = f"\n{display_left_delimiter}\n{span.get('content') or ''}\n{display_right_delimiter}\n"
                 else:
                     if span.get('image_path', ''):
                         content = f"![]({img_buket_path}/{span['image_path']})"
 
-            content = content.strip()
+            content = (content or '').strip()
             if content:
 
                 if span_type == ContentType.INTERLINE_EQUATION:
@@ -59,7 +75,7 @@ def merge_para_with_text(para_block, formula_enable=True, img_buket_path=''):
                 # logger.info(f'block_lang: {block_lang}, content: {content}')
 
                 # 判断是否为行末span
-                is_last_span = j == len(line['spans']) - 1
+                is_last_span = j == len(spans) - 1
 
                 if block_lang in cjk_langs:  # 中文/日语/韩文语境下，换行不需要空格分隔,但是如果是行内公式结尾，还是要加空格
                     if is_last_span and span_type != ContentType.INLINE_EQUATION:
@@ -76,12 +92,15 @@ def merge_para_with_text(para_block, formula_enable=True, img_buket_path=''):
                                 and is_hyphen_at_line_end(content)
                         ):
                             # 如果下一行的第一个span是小写字母开头，删除连字符
+                            next_line = lines[i + 1] if i + 1 < len(lines) else None
+                            next_spans = (next_line or {}).get('spans') or []
+                            first_next = next_spans[0] if next_spans else None
+                            next_c = (first_next.get('content') or '') if isinstance(first_next, dict) else ''
                             if (
-                                    i+1 < len(para_block['lines'])
-                                    and para_block['lines'][i + 1].get('spans')
-                                    and para_block['lines'][i + 1]['spans'][0].get('type') == ContentType.TEXT
-                                    and para_block['lines'][i + 1]['spans'][0].get('content', '')
-                                    and para_block['lines'][i + 1]['spans'][0]['content'][0].islower()
+                                    isinstance(first_next, dict)
+                                    and first_next.get('type') == ContentType.TEXT
+                                    and next_c
+                                    and next_c[0].islower()
                             ):
                                 para_text += content[:-1]
                             else:  # 如果没有下一行，或者下一行的第一个span不是小写字母开头，则保留连字符但不加空格

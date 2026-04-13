@@ -39,6 +39,7 @@ for cfg in "${configs[@]}"; do
 
   # Restart container with this config
   cd "$SCRIPT_DIR"
+  export MINERU_SPLIT_TAG="${MINERU_SPLIT_TAG:-$(date +%d-%m-%Y)}"
   export MINERU_VL_MAX_CONCURRENCY=$CONC
   export MINERU_VL_EXTRACTION_BATCH_SIZE=$BATCH
   docker compose -f docker-compose.api-split-vlm.yml up -d --force-recreate 2>/dev/null || true

@@ -360,6 +360,8 @@ class MagicModel:
 
 
 def isolated_formula_clean(txt):
+    if txt is None:
+        return ""
     latex = txt[:]
     if latex.startswith("\\["): latex = latex[2:]
     if latex.endswith("\\]"): latex = latex[:-2]

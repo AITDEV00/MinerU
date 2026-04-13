@@ -1,6 +1,8 @@
 # MinerU API - CPU-only image for split VLM (connects to external layout + extraction servers)
 # Build from MinerU repo root: docker build -f docker/Dockerfile.api -t adeo-mineru-api .
-FROM python:3.11-slim-bookworm
+# See Dockerfile.api-split-vlm for PYTHON_BASE / Docker Hub rate-limit notes.
+ARG PYTHON_BASE=public.ecr.aws/docker/library/python:3.11-slim-bookworm
+FROM ${PYTHON_BASE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-core fonts-noto-cjk fontconfig libgl1 libglib2.0-0 \

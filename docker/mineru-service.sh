@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 case "${1:-status}" in
   up)
+    export MINERU_SPLIT_TAG="${MINERU_SPLIT_TAG:-$(date +%d-%m-%Y)}"
     cd "$SCRIPT_DIR" && docker compose -f docker-compose.api-split-vlm.yml up -d
     echo "MinerU API: http://localhost:8085/docs"
     ;;

@@ -1,8 +1,15 @@
 # MinerU API with parse_method=vlm (Split Layout + Extraction)
 # Layout via MinerU2.5, extraction via Qwen3-VL. Models baked for air-gapped deployment.
-# Build from MinerU root: docker build -f docker/Dockerfile.api-split-vlm -t adeo-mineru-api:split-vlm .
+# Build from MinerU root: docker build -f docker/Dockerfile.api-split-vlm -t adeo-mineru-api:$(date +%d-%m-%Y) .
+# Or: cd docker && make build-split-vlm
+#
+# Base image: default is AWS Public ECR mirror of docker.io/library/python (same content, avoids
+# Docker Hub "429 Too Many Requests" for anonymous pulls). Override if your network blocks ECR:
+#   docker build --build-arg PYTHON_BASE=python:3.11-slim-bookworm ...
+# (use `docker login` at hub.docker.com first to raise Hub pull limits.)
 
-FROM python:3.11-slim-bookworm
+ARG PYTHON_BASE=public.ecr.aws/docker/library/python:3.11-slim-bookworm
+FROM ${PYTHON_BASE}
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-noto-core fonts-noto-cjk fontconfig libgl1 libglib2.0-0 \

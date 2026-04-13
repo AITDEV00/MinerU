@@ -128,6 +128,11 @@ def sanitize_filename(filename: str) -> str:
         sanitized = '_' + sanitized[1:]
     return sanitized or 'unnamed'
 
+
+def _api_internal_pdf_work_name() -> str:
+    """32-char hex; avoids Linux NAME_MAX / path length errors from long Unicode upload names."""
+    return uuid.uuid4().hex
+
 def cleanup_file(file_path: str) -> None:
     """清理临时 zip 文件"""
     try:
@@ -244,16 +249,17 @@ async def parse_pdf(
         unique_dir = os.path.join(output_dir, str(uuid.uuid4()))
         os.makedirs(unique_dir, exist_ok=True)
 
-        # 处理上传的PDF文件
-        pdf_file_names = []
-        pdf_bytes_list = []
+        # 处理上传的PDF文件（内部用短 ASCII work id 建目录，避免长阿拉伯语等文件名触发 Errno 36）
+        pdf_file_names: list[str] = []
+        pdf_bytes_list: list[bytes] = []
+        response_keys: list[str] = []
 
-        for file in files:
+        for idx, file in enumerate(files):
             content = await file.read()
-            file_path = Path(file.filename)
-
-            # 创建临时文件
-            temp_path = Path(unique_dir) / file_path.name
+            file_path = Path(file.filename or "upload")
+            work_name = _api_internal_pdf_work_name()
+            ext = file_path.suffix or ".bin"
+            temp_path = Path(unique_dir) / f"{work_name}{ext}"
             with open(temp_path, "wb") as f:
                 f.write(content)
 
@@ -263,7 +269,9 @@ async def parse_pdf(
                 try:
                     pdf_bytes = read_fn(temp_path)
                     pdf_bytes_list.append(pdf_bytes)
-                    pdf_file_names.append(file_path.stem)
+                    pdf_file_names.append(work_name)
+                    stem = file_path.stem or "document"
+                    response_keys.append(stem if len(files) == 1 else f"{stem}__{idx}")
                     os.remove(temp_path)  # 删除临时文件
                 except Exception as e:
                     return JSONResponse(
@@ -313,8 +321,8 @@ async def parse_pdf(
             zip_fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="mineru_results_")
             os.close(zip_fd)
             with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for pdf_name in pdf_file_names:
-                    safe_pdf_name = sanitize_filename(pdf_name)
+                for resp_key, pdf_name in zip(response_keys, pdf_file_names):
+                    safe_pdf_name = sanitize_filename(resp_key)
 
                     if backend.startswith("pipeline"):
                         parse_dir = os.path.join(unique_dir, pdf_name, parse_method)
@@ -373,11 +381,11 @@ async def parse_pdf(
                 background=BackgroundTask(cleanup_file, zip_path)
             )
         else:
-            # 构建 JSON 结果
+            # 构建 JSON 结果（键为上传时的逻辑名；磁盘目录仍用短 work id）
             result_dict = {}
-            for pdf_name in pdf_file_names:
-                result_dict[pdf_name] = {}
-                data = result_dict[pdf_name]
+            for resp_key, pdf_name in zip(response_keys, pdf_file_names):
+                result_dict[resp_key] = {}
+                data = result_dict[resp_key]
 
                 if backend.startswith("pipeline"):
                     parse_dir = os.path.join(unique_dir, pdf_name, parse_method)

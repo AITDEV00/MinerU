@@ -1,6 +1,7 @@
 #  Copyright (c) Opendatalab. All rights reserved.
 import asyncio
 import os
+import threading
 import time
 from collections import defaultdict
 
@@ -31,6 +32,13 @@ from mineru.backend.hybrid.extraction_routing import (
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'  # 让mps可以fallback
 os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'  # 禁止albumentations检查更新
+
+# HttpVlmClient (mineru_vl_utils) overwrites Authorization with MINERU_VL_API_KEY whenever that
+# env var is set. Split layout + extraction need different Bearer tokens via server_headers; we
+# temporarily unset the env during client init so passed headers are kept. Serialize init so
+# concurrent async requests cannot create a cached http-client while another coroutine's env swap
+# would leave the wrong key visible.
+_split_vlm_http_client_init_lock = threading.Lock()
 
 MFR_BASE_BATCH_SIZE = 16
 OCR_DET_BASE_BATCH_SIZE = 16
@@ -553,6 +561,30 @@ def _get_extraction_server_url() -> tuple[str | None, dict | None, str | None]:
     return url, headers, model_name
 
 
+def _get_split_vlm_http_clients(
+    backend: str,
+    model_path: str | None,
+    layout_url: str,
+    layout_kwargs: dict,
+    extraction_url: str,
+    extraction_kwargs: dict,
+) -> tuple[MinerUClient, MinerUClient]:
+    """Create layout + extraction http-clients with correct per-URL Bearer tokens (async-safe)."""
+    with _split_vlm_http_client_init_lock:
+        saved_key = os.environ.pop("MINERU_VL_API_KEY", None)
+        try:
+            layout_predictor = ModelSingleton().get_model(
+                backend, model_path, layout_url, **layout_kwargs
+            )
+            extraction_predictor = ModelSingleton().get_model(
+                backend, model_path, extraction_url, **extraction_kwargs
+            )
+            return layout_predictor, extraction_predictor
+        finally:
+            if saved_key is not None:
+                os.environ["MINERU_VL_API_KEY"] = saved_key
+
+
 def _batch_split_layout_extract(
     layout_client: MinerUClient,
     extraction_client: MinerUClient,
@@ -862,19 +894,14 @@ def doc_analyze(
         extraction_kwargs.setdefault("http_timeout", _http_timeout)
         extraction_kwargs.setdefault("max_retries", _max_retries)
         extraction_kwargs.setdefault("retry_backoff_factor", _retry_backoff)
-        layout_predictor = ModelSingleton().get_model(backend, model_path, layout_url, **layout_kwargs)
-        # HttpVlmClient overwrites headers with MINERU_VL_API_KEY; temporarily use extraction key
-        _old_key = os.environ.get("MINERU_VL_API_KEY")
-        _ext_key = os.getenv("MINERU_VL_API_KEY_EXTRACTION")
-        if _ext_key:
-            os.environ["MINERU_VL_API_KEY"] = _ext_key
-        try:
-            extraction_predictor = ModelSingleton().get_model(backend, model_path, extraction_url, **extraction_kwargs)
-        finally:
-            if _old_key is not None:
-                os.environ["MINERU_VL_API_KEY"] = _old_key
-            elif _ext_key and "MINERU_VL_API_KEY" in os.environ:
-                del os.environ["MINERU_VL_API_KEY"]
+        layout_predictor, extraction_predictor = _get_split_vlm_http_clients(
+            backend,
+            model_path,
+            layout_url,
+            layout_kwargs,
+            extraction_url,
+            extraction_kwargs,
+        )
         split_not_extract = _build_split_not_extract_list()
         results = _batch_split_layout_extract(
             layout_predictor,
@@ -999,19 +1026,14 @@ async def aio_doc_analyze(
         extraction_kwargs.setdefault("http_timeout", _http_timeout)
         extraction_kwargs.setdefault("max_retries", _max_retries)
         extraction_kwargs.setdefault("retry_backoff_factor", _retry_backoff)
-        layout_predictor = ModelSingleton().get_model(backend, model_path, layout_url, **layout_kwargs)
-        # HttpVlmClient overwrites headers with MINERU_VL_API_KEY; temporarily use extraction key
-        _old_key = os.environ.get("MINERU_VL_API_KEY")
-        _ext_key = os.getenv("MINERU_VL_API_KEY_EXTRACTION")
-        if _ext_key:
-            os.environ["MINERU_VL_API_KEY"] = _ext_key
-        try:
-            extraction_predictor = ModelSingleton().get_model(backend, model_path, extraction_url, **extraction_kwargs)
-        finally:
-            if _old_key is not None:
-                os.environ["MINERU_VL_API_KEY"] = _old_key
-            elif _ext_key and "MINERU_VL_API_KEY" in os.environ:
-                del os.environ["MINERU_VL_API_KEY"]
+        layout_predictor, extraction_predictor = _get_split_vlm_http_clients(
+            backend,
+            model_path,
+            layout_url,
+            layout_kwargs,
+            extraction_url,
+            extraction_kwargs,
+        )
         split_not_extract = _build_split_not_extract_list()
         results = await _aio_batch_split_layout_extract(
             layout_predictor,
