@@ -35,6 +35,8 @@ build:
 	@echo "Building $(NAME):$(DATE)..."
 	$(RUNTIME) build -f Dockerfile.api -t $(NAME):$(DATE) -t $(NAME):latest ..
 
+## aiadmin
+## qsdre34uiOO10
 login:
 	$(RUNTIME) login --tls-verify=false $(REGISTRY)
 

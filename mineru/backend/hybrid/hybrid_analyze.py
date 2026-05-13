@@ -569,20 +569,44 @@ def _get_split_vlm_http_clients(
     extraction_url: str,
     extraction_kwargs: dict,
 ) -> tuple[MinerUClient, MinerUClient]:
-    """Create layout + extraction http-clients with correct per-URL Bearer tokens (async-safe)."""
+    """Create layout + extraction http-clients with correct per-URL Bearer tokens (async-safe).
+
+    HttpVlmClient._get_model_name() reads the API key from the MINERU_VL_API_KEY env var
+    (or OPENAI_API_KEY which the entrypoint sets from it).  We must set the correct key
+    for each client creation rather than popping the var, otherwise the layout client
+    init fails with 401 because the key is missing from the environment.
+    """
+    layout_key = os.getenv("MINERU_VL_API_KEY")
+    extraction_key = os.getenv("MINERU_VL_API_KEY_EXTRACTION") or layout_key
     with _split_vlm_http_client_init_lock:
-        saved_key = os.environ.pop("MINERU_VL_API_KEY", None)
+        saved_vl_key = os.environ.get("MINERU_VL_API_KEY")
+        saved_openai_key = os.environ.get("OPENAI_API_KEY")
         try:
+            # Set layout key for layout client init
+            if layout_key:
+                os.environ["MINERU_VL_API_KEY"] = layout_key
+                os.environ["OPENAI_API_KEY"] = layout_key
             layout_predictor = ModelSingleton().get_model(
                 backend, model_path, layout_url, **layout_kwargs
             )
+            # Set extraction key for extraction client init
+            if extraction_key:
+                os.environ["MINERU_VL_API_KEY"] = extraction_key
+                os.environ["OPENAI_API_KEY"] = extraction_key
             extraction_predictor = ModelSingleton().get_model(
                 backend, model_path, extraction_url, **extraction_kwargs
             )
             return layout_predictor, extraction_predictor
         finally:
-            if saved_key is not None:
-                os.environ["MINERU_VL_API_KEY"] = saved_key
+            # Restore original env vars
+            if saved_vl_key is not None:
+                os.environ["MINERU_VL_API_KEY"] = saved_vl_key
+            else:
+                os.environ.pop("MINERU_VL_API_KEY", None)
+            if saved_openai_key is not None:
+                os.environ["OPENAI_API_KEY"] = saved_openai_key
+            else:
+                os.environ.pop("OPENAI_API_KEY", None)
 
 
 def _batch_split_layout_extract(
